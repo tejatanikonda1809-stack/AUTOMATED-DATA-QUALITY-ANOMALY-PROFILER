@@ -13,6 +13,7 @@ export async function apiFetch(path, options = {}) {
   const opts = {
     headers: defaultHeaders,
     signal: controller.signal,
+    cache: "no-store",
     ...options,
   };
   delete opts.timeout;
@@ -74,13 +75,13 @@ export async function analyze(dataset = "single") {
 }
 
 export async function getAnalysis(dataset = "single") {
-  return apiFetch(`/api/analysis/result?session_id=${window._sessionId}&dataset=${dataset}`);
+  return apiFetch(`/api/analysis/result?session_id=${window._sessionId}&dataset=${dataset}&_t=${Date.now()}`);
 }
 
 export async function getDatasetPreview(dataset = "single", { page = 0, pageSize = 50, search = "", sortCol = "", sortAsc = true, which = "working" } = {}) {
   const params = new URLSearchParams({
     session_id: window._sessionId, dataset, page, page_size: pageSize,
-    search, sort_col: sortCol, sort_asc: sortAsc, which,
+    search, sort_col: sortCol, sort_asc: sortAsc, which, _t: Date.now(),
   });
   return apiFetch(`/api/dataset/preview?${params}`);
 }
@@ -93,7 +94,7 @@ export async function getAffectedRows(dataset, indices) {
 }
 
 export async function getDatasetState(dataset = "single") {
-  return apiFetch(`/api/dataset/state?session_id=${window._sessionId}&dataset=${dataset}`);
+  return apiFetch(`/api/dataset/state?session_id=${window._sessionId}&dataset=${dataset}&_t=${Date.now()}`);
 }
 
 // Cleaning
@@ -157,6 +158,28 @@ export async function previewTypeConversion(dataset, column, targetType) {
   return apiFetch("/api/clean/preview-type-conversion", {
     method: "POST",
     body: { session_id: window._sessionId, dataset, column, target_type: targetType },
+  });
+}
+
+export async function getTypeIssueRows(dataset, column, page = 0, pageSize = 25) {
+  return apiFetch("/api/clean/type-issue-rows", {
+    method: "POST",
+    body: { session_id: window._sessionId, dataset, column, page, page_size: pageSize },
+  });
+}
+
+export async function resolveTypeRows(dataset, column, action, options = {}) {
+  return apiFetch("/api/clean/resolve-type-rows", {
+    method: "POST",
+    body: {
+      session_id: window._sessionId,
+      dataset,
+      column,
+      action,
+      row_indices: options.row_indices || [],
+      target_type: options.target_type || "int64",
+      manual_value: options.manual_value || null,
+    },
   });
 }
 

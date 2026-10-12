@@ -37,10 +37,12 @@ def create_app():
     def too_large(e):
         return {"error": "File too large. Maximum size is 100 MB."}, 413
 
-    @app.errorhandler(500)
-    def server_error(e):
-        app.logger.exception("Internal server error")
-        return {"error": "An internal server error occurred."}, 500
+    @app.after_request
+    def add_no_cache_headers(response):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
     return app
 

@@ -45,7 +45,7 @@ function renderReviewPage(container, dataset, stateRes) {
           </span>
         </div>
         <div style="display:flex; gap:0.5rem; flex-wrap:wrap">
-          <button class="btn btn-secondary btn-sm" id="btn-make-more-changes">🧹 Make More Changes</button>
+          <button class="btn btn-primary btn-sm" id="btn-make-more-changes">🧹 Make More Changes</button>
           <button class="btn btn-success btn-sm" id="btn-finalize-dataset" ${isFinalized ? 'disabled' : ''}>
             ${isFinalized ? '✓ Finalized' : '🔒 Finalize Dataset'}
           </button>

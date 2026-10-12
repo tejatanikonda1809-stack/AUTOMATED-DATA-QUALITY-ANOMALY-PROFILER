@@ -137,11 +137,13 @@ export async function renderCleaning(container, dataset, opts = {}) {
 
   // Open target modal if navigated with hint/column
   if (opts && opts.hint) {
-    if (opts.hint === "resolve_suspicious" || opts.hint === "suspicious") {
+    if (opts.hint === "repair_type") {
+      showRepairTypeModal(dataset, container, opts.column, opts.target);
+    } else if (opts.hint === "resolve_suspicious" || opts.hint === "suspicious") {
       showSuspiciousModal(dataset, container, opts.column);
     } else if (opts.hint === "resolve_outlier" || opts.hint === "outliers" || opts.hint === "inspect_outliers") {
       showOutlierModal(dataset, container, opts.column);
-    } else if (opts.hint === "fill_missing" || opts.hint === "missing" || (opts.column && opts.hint !== "duplicates")) {
+    } else if (opts.hint === "fill_missing" || opts.hint === "missing") {
       showFillMissingModal(dataset, opts.column, container);
     } else if (opts.hint === "delete_column_missing") {
       showDeleteColumnMissingModal(dataset, container, opts.column);
@@ -294,7 +296,7 @@ function renderTable(wrap, data, dataset, container) {
   `;
 
   data.records.forEach((row, idx) => {
-    const rowIdx = pageStart + idx;
+    const rowIdx = row._row_id !== undefined ? row._row_id : (pageStart + idx);
     const isRowSelected = selectedRows.has(rowIdx);
     html += `
       <tr data-row="${rowIdx}" class="${isRowSelected ? 'selected' : ''}">
@@ -538,34 +540,9 @@ function wireCleaningActions(container, dataset) {
     });
   };
 
-  // Repair type
+  // Repair type (Issue 2)
   container.querySelector("#act-repair-type").onclick = () => {
-    showModal({
-      title: "Repair Data Type",
-      body: `
-        <div class="form-group"><label class="form-label">Column Name</label><input class="form-input" id="m-type-col" placeholder="Column name"></div>
-        <div class="form-group">
-          <label class="form-label">Target Data Type</label>
-          <select class="form-select" id="m-type-target">
-            <option value="float64">Float (Decimal Number)</option>
-            <option value="int64">Integer (Whole Number)</option>
-            <option value="datetime64">Datetime / Date</option>
-            <option value="str">String / Text</option>
-          </select>
-        </div>
-      `,
-      confirmText: "Convert Data Type",
-      onConfirm: async () => {
-        const col = document.getElementById("m-type-col").value.trim();
-        const target = document.getElementById("m-type-target").value;
-        try {
-          await api.repairType(dataset, col, target);
-          await updateTopbar(dataset);
-          showAlert(`✓ Converted column '${col}' to ${target}`, "success");
-          await loadCleaningTable(container, dataset);
-        } catch (e) { showAlert(e.message, "error"); }
-      }
-    });
+    showRepairTypeModal(dataset, container);
   };
 
   // Resolve Outlier (Issue 19)
@@ -696,6 +673,1037 @@ async function showDeleteColumnMissingModal(dataset, container, defaultCol = nul
     });
   } catch (e) {
     showAlert(e.message, "error");
+  }
+}
+
+// ============================================================
+// Issue 3: REPAIR DATA TYPE MODAL (TWO-TAB FLOW: FIX AFFECTED VALUES & CONVERT ENTIRE COLUMN)
+// =========================================================================================
+async function showRepairTypeModal(dataset, container, initialCol = null, initialTarget = null) {
+  try {
+    const analysisRes = await api.getAnalysis(dataset);
+    let analysis = analysisRes.analysis || {};
+    let typeIssues = (analysis.types && analysis.types.type_issues) || [];
+    let colDetails = (analysis.types && analysis.types.column_details) || [];
+    let schemaCols = (analysis.schema && analysis.schema.columns) || [];
+
+    // Helper: Build map of all columns
+    function buildColMap(schema, details, issues) {
+      const map = new Map();
+      schema.forEach(c => {
+        map.set(c.name, {
+          name: c.name,
+          dtype: c.dtype || "unknown",
+          issues: []
+        });
+      });
+      details.forEach(cd => {
+        if (map.has(cd.column)) {
+          map.get(cd.column).dtype = cd.dtype;
+          map.get(cd.column).issues = cd.issues || [];
+        } else {
+          map.set(cd.column, { name: cd.column, dtype: cd.dtype, issues: cd.issues || [] });
+        }
+      });
+      issues.forEach(ti => {
+        if (ti.column && map.has(ti.column)) {
+          const entry = map.get(ti.column);
+          if (!entry.issues.some(x => x.type === ti.type)) {
+            entry.issues.push(ti);
+          }
+        }
+      });
+      return map;
+    }
+
+    let colMap = buildColMap(schemaCols, colDetails, typeIssues);
+    let allCols = Array.from(colMap.values());
+    if (!allCols.length) {
+      showAlert("No columns available to convert.", "error");
+      return;
+    }
+
+    let justResolvedCol = null;
+
+    function getIssueCount(colItem) {
+      if (!colItem || !colItem.issues || !colItem.issues.length) return 0;
+      let count = 0;
+      colItem.issues.forEach(i => {
+        if (Array.isArray(i.affected_indices)) {
+          count += i.affected_indices.length;
+        } else if (typeof i.numeric_count === "number") {
+          count += i.numeric_count;
+        } else {
+          count += 1;
+        }
+      });
+      return count || 1;
+    }
+
+    function formatSensibleValue(val) {
+      if (val === null || val === undefined) return "—";
+      const str = String(val);
+      const trimmed = str.trim();
+      if (/^-?\d+\.\d+$/.test(trimmed)) {
+        const parts = trimmed.split(".");
+        if (parts[1] && parts[1].length > 4) {
+          const num = parseFloat(trimmed);
+          if (!isNaN(num)) {
+            return num.toFixed(4).replace(/\.?0+$/, "");
+          }
+        }
+        return trimmed;
+      }
+      return str;
+    }
+
+    let colsWithIssues = allCols.filter(c => c.issues && c.issues.length > 0);
+    let cleanCols = allCols.filter(c => !c.issues || c.issues.length === 0);
+
+    // Helper: Categorize column dtype
+    function getColCategory(dtype) {
+      const d = String(dtype || "").toLowerCase();
+      if (d.includes("int")) return "int";
+      if (d.includes("float")) return "float";
+      if (d.includes("date") || d.includes("time")) return "date";
+      return "text";
+    }
+
+    // Helper: 6 Scoped Valid Conversions
+    function getValidTargets(cat) {
+      if (cat === "int") {
+        return [
+          { value: "float64", label: "Float (Decimal Number) — Int → Float" },
+          { value: "str", label: "Text / String — Int → Text" }
+        ];
+      }
+      if (cat === "float") {
+        return [
+          { value: "int64", label: "Integer (Whole Number) — Float → Int" },
+          { value: "str", label: "Text / String — Float → Text" }
+        ];
+      }
+      if (cat === "text") {
+        return [
+          { value: "int64", label: "Integer (Whole Number) — Text → Int" },
+          { value: "float64", label: "Float (Decimal Number) — Text → Float" },
+          { value: "datetime64", label: "Date / Datetime — Text → Date" }
+        ];
+      }
+      if (cat === "date") {
+        return [
+          { value: "str", label: "Text / String — Date → Text" }
+        ];
+      }
+      return [
+        { value: "float64", label: "Float (Decimal Number)" },
+        { value: "int64", label: "Integer (Whole Number)" },
+        { value: "str", label: "Text / String" }
+      ];
+    }
+
+    // Determine default tab and selected column
+    const initialHasIssue = initialCol && colsWithIssues.some(c => c.name === initialCol);
+    let activeTab = (initialHasIssue || colsWithIssues.length > 0) ? "tab-fix-values" : "tab-convert-column";
+    let defaultFixCol = initialHasIssue ? initialCol : (colsWithIssues.length > 0 ? colsWithIssues[0].name : "");
+    let defaultConvertCol = initialCol && colMap.has(initialCol) ? initialCol : (colsWithIssues.length > 0 ? colsWithIssues[0].name : allCols[0].name);
+
+    const modalHtml = `
+      <div style="display:flex; flex-direction:column; gap:1rem">
+        <!-- Navigation Tabs -->
+        <div style="display:flex; gap:0.5rem; border-bottom:1px solid var(--line); padding-bottom:0.6rem">
+          <button class="btn ${activeTab === 'tab-fix-values' ? 'btn-primary' : 'btn-secondary'} btn-sm repair-tab-btn" id="btn-tab-fix" data-tab="tab-fix-values">
+            🎯 Tab 1: Fix Affected Values ${colsWithIssues.length > 0 ? `(${colsWithIssues.length})` : ''}
+          </button>
+          <button class="btn ${activeTab === 'tab-convert-column' ? 'btn-primary' : 'btn-secondary'} btn-sm repair-tab-btn" id="btn-tab-convert" data-tab="tab-convert-column">
+            🔄 Tab 2: Convert Entire Column
+          </button>
+        </div>
+
+        <!-- Non-blocking prompt banner -->
+        <div id="m-repair-prompt-banner" style="display:none"></div>
+
+        <!-- TAB 1: Fix Affected Values -->
+        <div id="view-fix-values" style="display:${activeTab === 'tab-fix-values' ? 'block' : 'none'}">
+          ${colsWithIssues.length === 0 ? `
+            <div class="empty-state" style="padding:2.5rem 1rem">
+              <div style="font-size:2.5rem; margin-bottom:0.5rem">🎉</div>
+              <div class="empty-title">All column data types are clean!</div>
+              <div class="empty-sub" style="margin-bottom:1rem">No columns currently have unresolved type issues. You can convert any column to another type in Tab 2.</div>
+              <button class="btn btn-secondary btn-sm" id="btn-quick-switch-tab2">Switch to Convert Entire Column →</button>
+            </div>
+          ` : `
+            <div style="display:flex; flex-direction:column; gap:1rem">
+              <div class="form-group" style="margin-bottom:0">
+                <label class="form-label" style="display:flex; justify-content:space-between; align-items:center">
+                  <span>Select Flagged Column to Fix</span>
+                  <span style="font-size:0.75rem; color:var(--ink-faint)">Only columns with active type issues</span>
+                </label>
+                <select class="form-select" id="m-fix-col-select">
+                  ${colsWithIssues.map(c => {
+                    const cnt = getIssueCount(c);
+                    return `
+                      <option value="${escHtml(c.name)}" ${c.name === defaultFixCol ? 'selected' : ''}>
+                        ${escHtml(c.name)} (${cnt} issue${cnt === 1 ? '' : 's'})
+                      </option>
+                    `;
+                  }).join("")}
+                </select>
+              </div>
+
+              <!-- Container for affected rows table & actions -->
+              <div id="m-fix-rows-container" style="min-height:220px">
+                <div style="display:flex; align-items:center; justify-content:center; gap:0.5rem; color:var(--ink-faint); padding:2rem 0">
+                  <span class="spinner spinner-sm"></span> Loading affected rows...
+                </div>
+              </div>
+            </div>
+          `}
+        </div>
+
+        <!-- TAB 2: Convert Entire Column -->
+        <div id="view-convert-column" style="display:${activeTab === 'tab-convert-column' ? 'block' : 'none'}">
+          <div style="display:flex; flex-direction:column; gap:1rem">
+            <div class="form-group" style="margin-bottom:0">
+              <label class="form-label" style="display:flex; justify-content:space-between; align-items:center">
+                <span>Select Column to Convert</span>
+                <span id="m-repair-col-meta" style="font-weight:600; font-size:0.75rem; color:var(--ink-faint)"></span>
+              </label>
+              <select class="form-select" id="m-repair-col-select">
+                ${colsWithIssues.length > 0 ? `
+                  <optgroup label="⚠️ Columns with Detected Type Issues">
+                    ${colsWithIssues.map(c => `
+                      <option value="${escHtml(c.name)}" ${c.name === defaultConvertCol ? 'selected' : ''}>
+                        ${escHtml(c.name)} (${escHtml(c.dtype)}) — ${c.issues.map(i => i.type || i.description).join(", ")}
+                      </option>
+                    `).join("")}
+                  </optgroup>
+                ` : ''}
+                <optgroup label="${colsWithIssues.length > 0 ? 'Other Columns (Consistent / Clean)' : 'Dataset Columns'}">
+                  ${cleanCols.map(c => `
+                    <option value="${escHtml(c.name)}" ${c.name === defaultConvertCol ? 'selected' : ''}>
+                      ${escHtml(c.name)} (${escHtml(c.dtype)})
+                    </option>
+                  `).join("")}
+                </optgroup>
+              </select>
+            </div>
+
+            <div class="form-group" style="margin-bottom:0">
+              <label class="form-label" style="display:flex; justify-content:space-between; align-items:center">
+                <span>Target Data Type</span>
+                <span style="font-size:0.72rem; color:var(--ink-faint)">Filtered to valid scoped conversions</span>
+              </label>
+              <select class="form-select" id="m-repair-target-select"></select>
+            </div>
+
+            <div id="m-repair-preview-card" style="background:var(--surface-2); border:1px solid var(--line); border-radius:12px; padding:1.15rem; min-height:160px">
+              <div style="display:flex; align-items:center; justify-content:center; gap:0.5rem; color:var(--ink-faint); padding:2rem 0">
+                <span class="spinner spinner-sm"></span> Loading preview...
+              </div>
+            </div>
+
+            <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:0.5rem">
+              <button class="btn btn-secondary btn-sm" id="btn-cancel-tab2">Cancel</button>
+              <button class="btn btn-primary btn-sm" id="btn-apply-col-conversion" disabled>Apply Conversion</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    showModal({
+      title: "🔧 Repair Column Data Type",
+      body: modalHtml,
+      showConfirm: false,
+      showCancel: true,
+      cancelText: "Close",
+      autoClose: false,
+    });
+
+    const backdropEl = document.getElementById("modal-backdrop");
+    const modalDialog = backdropEl?.querySelector(".modal");
+    if (modalDialog) modalDialog.classList.add("modal-lg");
+
+    // Close / Cancel button wiring
+    const cleanupModal = () => {
+      justResolvedCol = null;
+      const promptBanner = document.getElementById("m-repair-prompt-banner");
+      if (promptBanner) {
+        promptBanner.style.display = "none";
+        promptBanner.innerHTML = "";
+      }
+      if (modalDialog) modalDialog.classList.remove("modal-lg");
+      closeModal();
+    };
+
+    const btnCloseModal = document.getElementById("modal-close");
+    if (btnCloseModal) btnCloseModal.onclick = cleanupModal;
+    const btnCancelModal = document.getElementById("modal-cancel");
+    if (btnCancelModal) btnCancelModal.onclick = cleanupModal;
+
+    // Tab switching wiring
+    const btnTabFix = document.getElementById("btn-tab-fix");
+    const btnTabConvert = document.getElementById("btn-tab-convert");
+    const viewFix = document.getElementById("view-fix-values");
+    const viewConvert = document.getElementById("view-convert-column");
+
+    function switchTab(tab) {
+      activeTab = tab;
+      justResolvedCol = null;
+      const promptBanner = document.getElementById("m-repair-prompt-banner");
+      if (promptBanner) {
+        promptBanner.style.display = "none";
+        promptBanner.innerHTML = "";
+      }
+      if (tab === "tab-fix-values") {
+        btnTabFix?.classList.remove("btn-secondary");
+        btnTabFix?.classList.add("btn-primary");
+        btnTabConvert?.classList.remove("btn-primary");
+        btnTabConvert?.classList.add("btn-secondary");
+        if (viewFix) viewFix.style.display = "block";
+        if (viewConvert) viewConvert.style.display = "none";
+        loadTab1();
+      } else {
+        btnTabConvert?.classList.remove("btn-secondary");
+        btnTabConvert?.classList.add("btn-primary");
+        btnTabFix?.classList.remove("btn-primary");
+        btnTabFix?.classList.add("btn-secondary");
+        if (viewFix) viewFix.style.display = "none";
+        if (viewConvert) viewConvert.style.display = "block";
+        updateTargetDropdown();
+      }
+    }
+
+    if (btnTabFix) btnTabFix.onclick = () => switchTab("tab-fix-values");
+    if (btnTabConvert) btnTabConvert.onclick = () => switchTab("tab-convert-column");
+    const btnQuickSwitch = document.getElementById("btn-quick-switch-tab2");
+    if (btnQuickSwitch) btnQuickSwitch.onclick = () => switchTab("tab-convert-column");
+    const btnCancelTab2 = document.getElementById("btn-cancel-tab2");
+    if (btnCancelTab2) btnCancelTab2.onclick = cleanupModal;
+
+    // ==========================================
+    // TAB 1: FIX AFFECTED VALUES IMPLEMENTATION
+    // ==========================================
+    let tab1SelectedRows = new Set();
+    let tab1Page = 0;
+    const tab1PageSize = 20;
+
+    async function loadTab1() {
+      const rowsContainer = document.getElementById("m-fix-rows-container");
+      if (!rowsContainer) return;
+
+      // Re-fetch fresh analysis so Tab 1 and Issue Center read the EXACT same current detection result
+      try {
+        const analysisRes = await api.getAnalysis(dataset);
+        let analysis = analysisRes.analysis || {};
+        let typeIssues = (analysis.types && analysis.types.type_issues) || [];
+        let colDetails = (analysis.types && analysis.types.column_details) || [];
+        let schemaCols = (analysis.schema && analysis.schema.columns) || [];
+        colMap = buildColMap(schemaCols, colDetails, typeIssues);
+        allCols = Array.from(colMap.values());
+        colsWithIssues = allCols.filter(c => c.issues && c.issues.length > 0);
+        cleanCols = allCols.filter(c => !c.issues || c.issues.length === 0);
+      } catch (err) {
+        console.error("Failed to re-fetch analysis:", err);
+      }
+
+      if (btnTabFix) {
+        btnTabFix.innerHTML = `🎯 Tab 1: Fix Affected Values ${colsWithIssues.length > 0 ? `(${colsWithIssues.length})` : ''}`;
+      }
+
+      const colSel = document.getElementById("m-fix-col-select");
+      let col = colSel ? colSel.value : defaultFixCol;
+
+      const promptBanner = document.getElementById("m-repair-prompt-banner");
+      const colStillHasIssues = colsWithIssues.some(c => c.name === col);
+
+      if (!colStillHasIssues) {
+        if (justResolvedCol && justResolvedCol === col) {
+          if (promptBanner) {
+            promptBanner.style.display = "block";
+            promptBanner.innerHTML = `
+              <div class="alert alert-success" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem; margin-bottom:0.75rem">
+                <div>
+                  <strong>🎉 All type issues in '${escHtml(col)}' are resolved!</strong>
+                  <span style="margin-left:0.35rem">
+                    <a href="javascript:void(0)" id="link-prompt-switch-tab2" style="color:inherit; text-decoration:underline; font-weight:600">Switch to Tab 2 (Convert Entire Column) →</a>
+                  </span>
+                </div>
+                <button class="btn btn-ghost btn-sm" id="btn-prompt-dismiss" style="padding:0.2rem 0.5rem">Dismiss</button>
+              </div>
+            `;
+            const linkSwitch = promptBanner.querySelector("#link-prompt-switch-tab2");
+            if (linkSwitch) {
+              linkSwitch.onclick = () => {
+                defaultConvertCol = col;
+                switchTab("tab-convert-column");
+              };
+            }
+            const btnDismiss = promptBanner.querySelector("#btn-prompt-dismiss");
+            if (btnDismiss) {
+              btnDismiss.onclick = () => {
+                promptBanner.style.display = "none";
+                promptBanner.innerHTML = "";
+                justResolvedCol = null;
+              };
+            }
+          }
+        } else {
+          if (promptBanner) {
+            promptBanner.style.display = "none";
+            promptBanner.innerHTML = "";
+          }
+        }
+
+        if (colsWithIssues.length > 0) {
+          col = colsWithIssues[0].name;
+          defaultFixCol = col;
+        } else {
+          col = "";
+          defaultFixCol = "";
+        }
+      } else {
+        justResolvedCol = null;
+        if (promptBanner) {
+          promptBanner.style.display = "none";
+          promptBanner.innerHTML = "";
+        }
+      }
+
+      if (colSel) {
+        colSel.innerHTML = colsWithIssues.map(c => {
+          const cnt = getIssueCount(c);
+          return `
+            <option value="${escHtml(c.name)}" ${c.name === col ? 'selected' : ''}>
+              ${escHtml(c.name)} (${cnt > 0 ? `${cnt} issue${cnt === 1 ? '' : 's'}` : 'column stored as text'})
+            </option>
+          `;
+        }).join("");
+      }
+
+      if (colsWithIssues.length === 0) {
+        rowsContainer.innerHTML = `
+          <div class="empty-state" style="padding:2.5rem 1rem">
+            <div style="font-size:2.5rem; margin-bottom:0.5rem">🎉</div>
+            <div class="empty-title">All column data types are clean!</div>
+            <div class="empty-sub" style="margin-bottom:1rem">No columns currently have unresolved type issues. You can convert any column to another type in Tab 2.</div>
+            <button class="btn btn-secondary btn-sm" id="btn-quick-switch-tab2">Switch to Convert Entire Column →</button>
+          </div>
+        `;
+        const btnQuick = rowsContainer.querySelector("#btn-quick-switch-tab2");
+        if (btnQuick) btnQuick.onclick = () => switchTab("tab-convert-column");
+        return;
+      }
+
+      tab1SelectedRows.clear();
+      rowsContainer.innerHTML = `
+        <div style="display:flex; align-items:center; justify-content:center; gap:0.5rem; color:var(--ink-faint); padding:2rem 0">
+          <span class="spinner spinner-sm"></span> Loading affected rows for '${escHtml(col)}'...
+        </div>
+      `;
+
+      try {
+        const res = await api.getTypeIssueRows(dataset, col, tab1Page, tab1PageSize);
+        renderTab1Content(res, col);
+      } catch (e) {
+        rowsContainer.innerHTML = `<div class="alert alert-error">✗ Failed to load affected rows: ${escHtml(e.message)}</div>`;
+      }
+    }
+
+    function renderTab1Content(res, col) {
+      const rowsContainer = document.getElementById("m-fix-rows-container");
+      if (!rowsContainer) return;
+
+      const total = res.total_affected || 0;
+      const totalPages = res.total_pages || 1;
+      const rows = res.rows || [];
+      const propTarget = res.proposed_target || "Int64";
+      const cleanCount = res.clean_count ?? 0;
+      const unconvertibleCount = res.unconvertible_count ?? 0;
+      const decimalLossCount = res.decimal_loss_count ?? 0;
+      const totalValues = res.total_values || (cleanCount + total);
+      const allProblemIndices = res.all_problem_indices || [];
+      const unconvertibleIndices = res.unconvertible_indices || [];
+
+      // By default, select all problem rows across all pages
+      tab1SelectedRows.clear();
+      allProblemIndices.forEach(idx => tab1SelectedRows.add(idx));
+
+      rowsContainer.innerHTML = `
+        <!-- Summary Box: Column-level summary, clean vs unconvertible counts, proposed type -->
+        <div style="background:var(--surface-2); border:1px solid var(--line); border-radius:8px; padding:0.75rem 1rem; margin-bottom:0.85rem">
+          <div style="font-size:0.875rem; font-weight:600; color:var(--ink); margin-bottom:0.35rem">
+            ${escHtml(res.summary || `'${col}' is stored as text. ${cleanCount} values convert cleanly${unconvertibleCount > 0 ? `; ${unconvertibleCount} cannot (listed below)` : ' (0 problem rows)'}.`)}
+          </div>
+          <div style="font-size:0.78rem; color:var(--ink-faint); display:flex; gap:1rem; flex-wrap:wrap; align-items:center">
+            <span>Column: <strong>'${escHtml(col)}'</strong></span>
+            <span>Current: <code>${escHtml(res.current_dtype)}</code></span>
+            <span>Proposed Type: <strong style="color:var(--accent)"><code>${escHtml(propTarget)}</code></strong></span>
+            <span>Total Rows: <strong>${totalValues}</strong></span>
+            <span>Convert Cleanly: <strong style="color:var(--success)">${cleanCount}</strong></span>
+            <span>Cannot Convert: <strong style="${unconvertibleCount > 0 ? 'color:var(--danger)' : ''}">${unconvertibleCount}</strong></span>
+            ${decimalLossCount > 0 ? `<span>Rounding: <strong style="color:var(--warning)">${decimalLossCount}</strong></span>` : ''}
+          </div>
+        </div>
+
+        <!-- Action Toolbar: Select All, Selected Count, Delete unconvertible, Convert entire column -->
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.65rem; flex-wrap:wrap; gap:0.5rem">
+          <div style="display:flex; align-items:center; gap:0.5rem">
+            ${total > 0 ? `
+              <label style="display:flex; align-items:center; gap:0.35rem; font-size:0.8125rem; cursor:pointer">
+                <input type="checkbox" id="chk-all-fix-rows" ${tab1SelectedRows.size > 0 ? 'checked' : ''} /> Select All
+              </label>
+              <span style="font-size:0.75rem; color:var(--ink-faint)" id="fix-selected-count">All ${tab1SelectedRows.size} problem rows selected</span>
+            ` : `
+              <span style="font-size:0.8125rem; color:var(--success); font-weight:600">✓ No value-level problems in this column</span>
+            `}
+          </div>
+          <div style="display:flex; gap:0.5rem; flex-wrap:wrap">
+            ${total > 0 ? `
+              <button class="btn btn-secondary btn-sm" id="btn-fix-delete" title="Delete rows containing values that cannot convert">
+                Delete rows with unconvertible values (${unconvertibleCount || total})
+              </button>
+            ` : ''}
+            <button class="btn btn-primary btn-sm" id="btn-fix-convert-all" title="Convert the whole column across all rows in one action">
+              Convert entire column (${cleanCount} values to ${escHtml(propTarget)})
+            </button>
+          </div>
+        </div>
+
+        <!-- Problem Rows Table (Lists ONLY genuine value-level problems) -->
+        ${rows.length === 0 ? `
+          <div style="background:var(--surface-2); border:1px solid var(--line); border-radius:8px; padding:2rem 1rem; text-align:center; color:var(--ink-soft); margin-bottom:0.75rem">
+            <div style="font-size:1.75rem; margin-bottom:0.35rem">✓</div>
+            <div style="font-weight:700; font-size:0.95rem; margin-bottom:0.25rem">No Value-Level Problem Rows</div>
+            <div style="font-size:0.8125rem; color:var(--ink-faint)">
+              All ${cleanCount} values in <strong>'${escHtml(col)}'</strong> convert cleanly to <code>${escHtml(propTarget)}</code>. Click 'Convert entire column' above to apply.
+            </div>
+          </div>
+        ` : `
+          <div class="data-table-wrap" style="max-height:300px; overflow-y:auto">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width:36px"><input type="checkbox" id="chk-head-sync" checked /></th>
+                  <th style="width:65px">Row #</th>
+                  <th>Stored Value</th>
+                  <th>Proposed Converted Value</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rows.map(r => `
+                  <tr data-row="${r.row_index}">
+                    <td><input type="checkbox" class="chk-fix-row" data-row="${r.row_index}" ${tab1SelectedRows.has(r.row_index) ? 'checked' : ''} /></td>
+                    <td><strong>${r.row_index}</strong></td>
+                    <td><code>${escHtml(formatSensibleValue(r.current_value))}</code></td>
+                    <td>${r.proposed_value !== null && r.proposed_value !== undefined ? `<strong style="color:var(--accent)">${escHtml(formatSensibleValue(r.proposed_value))}</strong>` : '<span style="color:var(--ink-faint)">null (blank)</span>'}</td>
+                    <td>
+                      ${r.can_convert ? `
+                        <span class="badge badge-warning" style="font-size:0.75rem" title="${escHtml(r.fail_reason || '')}">⚠️ Rounding: ${escHtml(r.fail_reason || 'decimal will be rounded')}</span>
+                      ` : `
+                        <span class="badge badge-danger" style="font-size:0.75rem" title="${escHtml(r.fail_reason || '')}">⚠️ Cannot convert${r.fail_reason ? `: ${escHtml(r.fail_reason)}` : ''}</span>
+                      `}
+                    </td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
+          </div>
+        `}
+
+        ${totalPages > 1 ? `
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.65rem; font-size:0.8125rem">
+            <span>Page ${tab1Page + 1} of ${totalPages} (${total} total problem rows)</span>
+            <div style="display:flex; gap:0.35rem">
+              <button class="btn btn-secondary btn-sm" id="btn-tab1-prev" ${tab1Page <= 0 ? 'disabled' : ''}>← Prev</button>
+              <button class="btn btn-secondary btn-sm" id="btn-tab1-next" ${tab1Page >= totalPages - 1 ? 'disabled' : ''}>Next →</button>
+            </div>
+          </div>
+        ` : ''}
+      `;
+
+      // Wire checkboxes
+      const chkAll = rowsContainer.querySelector("#chk-all-fix-rows");
+      const chkHeadSync = rowsContainer.querySelector("#chk-head-sync");
+      const selCount = rowsContainer.querySelector("#fix-selected-count");
+      const btnConvertAll = rowsContainer.querySelector("#btn-fix-convert-all");
+      const btnDelete = rowsContainer.querySelector("#btn-fix-delete");
+
+      function updateFixSelection() {
+        const size = tab1SelectedRows.size;
+        const totalCount = allProblemIndices.length;
+        if (selCount) {
+          if (size === totalCount) {
+            selCount.textContent = `All ${size} problem rows selected`;
+          } else {
+            selCount.textContent = `${size} of ${totalCount} selected`;
+          }
+        }
+        if (btnDelete) {
+          btnDelete.disabled = size === 0 && unconvertibleCount === 0;
+          if (size > 0 && size < totalCount) {
+            btnDelete.textContent = `Delete ${size} selected rows`;
+          } else {
+            btnDelete.textContent = `Delete rows with unconvertible values (${unconvertibleCount || totalCount})`;
+          }
+        }
+        const allPageChecked = rows.length > 0 && rows.every(r => tab1SelectedRows.has(r.row_index));
+        if (chkAll) chkAll.checked = size === totalCount && totalCount > 0;
+        if (chkHeadSync) chkHeadSync.checked = allPageChecked;
+      }
+
+      rowsContainer.querySelectorAll(".chk-fix-row").forEach(chk => {
+        chk.onchange = (e) => {
+          const r = parseInt(chk.dataset.row);
+          if (e.target.checked) tab1SelectedRows.add(r); else tab1SelectedRows.delete(r);
+          updateFixSelection();
+        };
+      });
+
+      function handleSelectAll(checked) {
+        if (checked) {
+          allProblemIndices.forEach(idx => tab1SelectedRows.add(idx));
+        } else {
+          tab1SelectedRows.clear();
+        }
+        rowsContainer.querySelectorAll(".chk-fix-row").forEach(c => c.checked = checked);
+        updateFixSelection();
+      }
+
+      if (chkAll) chkAll.onchange = (e) => handleSelectAll(e.target.checked);
+      if (chkHeadSync) chkHeadSync.onchange = (e) => handleSelectAll(e.target.checked);
+
+      // Primary Button: Convert WHOLE column in one action across ALL rows
+      if (btnConvertAll) {
+        btnConvertAll.onclick = async () => {
+          let warningMsg = `Convert entire column '${col}' to ${propTarget}?\n\n`;
+          warningMsg += `• ${cleanCount} value(s) will be converted cleanly to ${propTarget}.\n`;
+          if (unconvertibleCount > 0) {
+            const unconvList = rows.filter(r => !r.can_convert).map(r => `Row ${r.row_index}: '${r.current_value}'`).slice(0, 10);
+            warningMsg += `• WARNING: ${unconvertibleCount} value(s) cannot convert and will become blank/null:\n  ${unconvList.join("\n  ")}${unconvertibleCount > 10 ? `\n  ...and ${unconvertibleCount - 10} more` : ''}\n\n`;
+          }
+          if (decimalLossCount > 0) {
+            warningMsg += `• ${decimalLossCount} decimal value(s) will be rounded to integers.\n\n`;
+          }
+          if (res.has_missing) {
+            warningMsg += `• Existing blanks stay blank.\n\n`;
+          }
+          warningMsg += `Proceed with converting the entire column?`;
+
+          if (unconvertibleCount > 0 || decimalLossCount > 0) {
+            if (!confirm(warningMsg)) return;
+          }
+
+          btnConvertAll.disabled = true;
+          btnConvertAll.textContent = "Converting entire column...";
+
+          try {
+            await api.resolveTypeRows(dataset, col, "convert_column", {
+              target_type: propTarget,
+            });
+
+            justResolvedCol = col;
+            await updateTopbar(dataset);
+            await loadCleaningTable(container, dataset);
+            showAlert(`✓ Converted entire column '${col}' to ${propTarget}.`, "success");
+            await loadTab1();
+          } catch (err) {
+            btnConvertAll.disabled = false;
+            btnConvertAll.textContent = `Convert entire column (${cleanCount} values to ${escHtml(propTarget)})`;
+            showAlert(err.message, "error");
+          }
+        };
+      }
+
+      // Secondary Button: Delete rows with unconvertible values
+      if (btnDelete) {
+        btnDelete.onclick = async () => {
+          const targetRows = tab1SelectedRows.size > 0
+            ? Array.from(tab1SelectedRows)
+            : (unconvertibleIndices.length > 0 ? unconvertibleIndices : allProblemIndices);
+          if (targetRows.length === 0) return;
+
+          if (!confirm(`Are you sure you want to delete ${targetRows.length} row(s) containing unconvertible values in '${col}'?`)) {
+            return;
+          }
+
+          btnDelete.disabled = true;
+          btnDelete.textContent = "Deleting...";
+
+          try {
+            await api.resolveTypeRows(dataset, col, "delete_row", {
+              row_indices: targetRows,
+              target_type: propTarget,
+            });
+
+            justResolvedCol = col;
+            await updateTopbar(dataset);
+            await loadCleaningTable(container, dataset);
+            showAlert(`✓ Deleted ${targetRows.length} row(s) in '${col}'.`, "success");
+            await loadTab1();
+          } catch (err) {
+            btnDelete.disabled = false;
+            btnDelete.textContent = "Delete rows with unconvertible values";
+            showAlert(err.message, "error");
+          }
+        };
+      }
+
+      // Wire pagination
+      const btnPrev = rowsContainer.querySelector("#btn-tab1-prev");
+      if (btnPrev) btnPrev.onclick = () => { tab1Page--; loadTab1(); };
+      const btnNext = rowsContainer.querySelector("#btn-tab1-next");
+      if (btnNext) btnNext.onclick = () => { tab1Page++; loadTab1(); };
+    }
+
+    const colSelFix = document.getElementById("m-fix-col-select");
+    if (colSelFix) {
+      colSelFix.onchange = () => {
+        justResolvedCol = null;
+        const promptBanner = document.getElementById("m-repair-prompt-banner");
+        if (promptBanner) {
+          promptBanner.style.display = "none";
+          promptBanner.innerHTML = "";
+        }
+        tab1Page = 0;
+        loadTab1();
+      };
+    }
+
+    // ==========================================
+    // TAB 2: CONVERT ENTIRE COLUMN IMPLEMENTATION
+    // ==========================================
+    const colSelConvert = document.getElementById("m-repair-col-select");
+    const targetSel = document.getElementById("m-repair-target-select");
+    const metaSpan = document.getElementById("m-repair-col-meta");
+    const previewCard = document.getElementById("m-repair-preview-card");
+    const btnApplyCol = document.getElementById("btn-apply-col-conversion");
+
+    async function updateTargetDropdown() {
+      if (!colSelConvert || !targetSel) return;
+      const currentSelectedCol = colSelConvert.value;
+      const colEntry = colMap.get(currentSelectedCol) || { dtype: "unknown" };
+      const cat = getColCategory(colEntry.dtype);
+      if (metaSpan) metaSpan.textContent = `Current Type: ${colEntry.dtype} (${cat.toUpperCase()})`;
+
+      const targets = getValidTargets(cat);
+      targetSel.innerHTML = targets.map((t, idx) => `
+        <option value="${t.value}" ${initialTarget && t.value === initialTarget ? 'selected' : (idx === 0 ? 'selected' : '')}>
+          ${escHtml(t.label)}
+        </option>
+      `).join("");
+
+      await runPreview();
+    }
+
+    async function runPreview() {
+      if (!colSelConvert || !targetSel || !previewCard || !btnApplyCol) return;
+      const col = colSelConvert.value;
+      const target = targetSel.value;
+      if (!col || !target) return;
+
+      btnApplyCol.disabled = true;
+      btnApplyCol.textContent = "Analyzing...";
+
+      previewCard.innerHTML = `
+        <div style="display:flex; align-items:center; justify-content:center; gap:0.5rem; color:var(--ink-faint); padding:1.5rem 0">
+          <span class="spinner spinner-sm"></span> Analyzing type conversion...
+        </div>
+      `;
+
+      try {
+        const prev = await api.previewTypeConversion(dataset, col, target);
+        if (prev.error) {
+          previewCard.innerHTML = `<div class="alert alert-error">✗ ${escHtml(prev.error)}</div>`;
+          btnApplyCol.disabled = true;
+          return;
+        }
+
+        renderPreviewContent(prev);
+      } catch (err) {
+        previewCard.innerHTML = `<div class="alert alert-error">✗ Failed to preview conversion: ${escHtml(err.message)}</div>`;
+        btnApplyCol.disabled = true;
+      }
+    }
+
+    function renderPreviewContent(p) {
+      const col = p.column;
+      const target = p.target_type;
+      const convCode = p.conversion_code || "";
+      const total = p.total_values || 0;
+      const convertible = p.convertible_count ?? total;
+      const nonConvertible = p.non_convertible_count ?? 0;
+      const decLoss = p.decimal_loss_count ?? 0;
+
+      let bannerHtml = "";
+      let requiresCheckbox = false;
+
+      if (convCode === "int_to_float") {
+        bannerHtml = `
+          <div class="alert alert-success" style="margin-bottom:0.85rem">
+            <div>
+              <strong>✅ Safe Conversion (Int → Float):</strong>
+              All integer values will be converted to floating-point numbers with standard decimal precision.
+            </div>
+          </div>
+        `;
+      } else if (convCode === "float_to_int") {
+        if (decLoss === 0) {
+          bannerHtml = `
+            <div class="alert alert-success" style="margin-bottom:0.85rem">
+              <div>
+                <strong>✅ Safe Conversion (Float → Int):</strong>
+                Every value in this column is already a whole number with no fractional decimal part.
+              </div>
+            </div>
+          `;
+        } else {
+          requiresCheckbox = true;
+          bannerHtml = `
+            <div class="alert alert-warning" style="margin-bottom:0.85rem">
+              <div>
+                <div style="font-weight:700">⚠️ Precision Loss Warning (Float → Int):</div>
+                <div style="margin:0.25rem 0 0.5rem">
+                  <strong>${decLoss} of ${total}</strong> values have fractional decimal parts that will be rounded to integers using round-half-up:
+                  ${p.decimal_loss_examples && p.decimal_loss_examples.length ? `<span style="font-family:monospace; background:rgba(0,0,0,0.06); padding:0.1rem 0.35rem; border-radius:4px">${p.decimal_loss_examples.join(", ")}</span>` : ""}.
+                </div>
+                <label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer; font-weight:700; color:var(--ink); margin-top:0.4rem; padding-top:0.4rem; border-top:1px dashed rgba(217,119,6,0.3)">
+                  <input type="checkbox" id="m-repair-chk-loss" style="width:16px; height:16px; cursor:pointer" />
+                  <span>I confirm and authorize rounding ${decLoss} decimal values to integers.</span>
+                </label>
+              </div>
+            </div>
+          `;
+        }
+      } else if (convCode === "num_to_text") {
+        bannerHtml = `
+          <div class="alert alert-warning" style="margin-bottom:0.85rem">
+            <div>
+              <strong>⚠️ Capability Warning (Numeric → Text):</strong>
+              Converting to text preserves exact values, but this column will <strong>lose numeric calculation and statistical profiling capabilities</strong>.
+            </div>
+          </div>
+        `;
+      } else if (convCode === "text_to_int" || convCode === "text_to_float") {
+        if (p.will_be_empty || (total > 0 && convertible === 0 && nonConvertible > 0)) {
+          bannerHtml = `
+            <div class="alert alert-error" style="margin-bottom:0.85rem">
+              <div>
+                <div style="font-weight:700">❌ Complete Conversion Failure:</div>
+                <div style="margin-top:0.25rem">
+                  All <strong>${nonConvertible}</strong> value(s) in this column failed conversion to ${escHtml(target)} and would become null/NaN.
+                  This conversion would leave the column entirely empty and cannot be applied.
+                  <div style="margin-top:0.35rem; font-family:monospace; font-size:0.75rem; background:rgba(0,0,0,0.06); padding:0.35rem 0.6rem; border-radius:6px">
+                    ${(p.non_convertible_examples || []).join(", ")}
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
+        } else if (nonConvertible > 0) {
+          bannerHtml = `
+            <div class="alert alert-warning" style="margin-bottom:0.85rem">
+              <div>
+                <div style="font-weight:700">⚠️ Partial Conversion (${convertible} of ${total} valid):</div>
+                <div style="margin-top:0.25rem">
+                  <strong>${convertible} of ${total}</strong> values converted successfully.
+                  <strong>${nonConvertible} value(s) could not be converted</strong> and will become null/NaN:
+                  <div style="margin-top:0.35rem; font-family:monospace; font-size:0.75rem; background:rgba(0,0,0,0.06); padding:0.35rem 0.6rem; border-radius:6px">
+                    ${(p.non_convertible_examples || []).join(", ")}
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
+        } else {
+          bannerHtml = `
+            <div class="alert alert-success" style="margin-bottom:0.85rem">
+              <div>
+                <strong>✅ Clean Conversion:</strong>
+                All ${convertible} text values parse cleanly into valid numbers.
+              </div>
+            </div>
+          `;
+        }
+        if (convCode === "text_to_int" && decLoss > 0) {
+          requiresCheckbox = true;
+          bannerHtml += `
+            <div class="alert alert-warning" style="margin-bottom:0.85rem">
+              <div>
+                <div style="font-weight:700">⚠️ Decimal Rounding Notice:</div>
+                <div style="margin:0.25rem 0 0.4rem">
+                  ${decLoss} values contain decimal points and will be rounded using round-half-up: ${(p.decimal_loss_examples || []).join(", ")}.
+                </div>
+                <label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer; font-weight:700; color:var(--ink); margin-top:0.35rem">
+                  <input type="checkbox" id="m-repair-chk-loss" style="width:16px; height:16px; cursor:pointer" />
+                  <span>I authorize rounding ${decLoss} decimal values to integers.</span>
+                </label>
+              </div>
+            </div>
+          `;
+        }
+      } else if (convCode === "text_to_date" || (convCode && convCode.endsWith("_to_date"))) {
+        if (p.will_be_empty || (total > 0 && convertible === 0 && nonConvertible > 0)) {
+          bannerHtml = `
+            <div class="alert alert-error" style="margin-bottom:0.85rem">
+              <div>
+                <div style="font-weight:700">❌ Complete Conversion Failure:</div>
+                <div style="margin-top:0.25rem">
+                  All <strong>${nonConvertible}</strong> value(s) in this column failed date parsing and would become null.
+                  This conversion would leave the column entirely empty and cannot be applied.
+                  <div style="margin-top:0.35rem; font-family:monospace; font-size:0.75rem; background:rgba(0,0,0,0.06); padding:0.35rem 0.6rem; border-radius:6px">
+                    ${(p.non_convertible_examples || []).join(", ")}
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
+        } else if (nonConvertible > 0) {
+          bannerHtml = `
+            <div class="alert alert-warning" style="margin-bottom:0.85rem">
+              <div>
+                <div style="font-weight:700">⚠️ Date Parsing Issues (${convertible} of ${total} recognized):</div>
+                <div style="margin-top:0.25rem">
+                  <strong>${convertible} of ${total}</strong> values recognized as valid dates.
+                  <strong>${nonConvertible} value(s) failed date parsing</strong> and will become null:
+                  <div style="margin-top:0.35rem; font-family:monospace; font-size:0.75rem; background:rgba(0,0,0,0.06); padding:0.35rem 0.6rem; border-radius:6px">
+                    ${(p.non_convertible_examples || []).join(", ")}
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
+        } else {
+          bannerHtml = `
+            <div class="alert alert-success" style="margin-bottom:0.85rem">
+              <div>
+                <strong>✅ Clean Date Conversion:</strong>
+                All ${convertible} values parsed successfully into standard dates.
+              </div>
+            </div>
+          `;
+        }
+      } else if (convCode === "date_to_text") {
+        bannerHtml = `
+          <div class="alert alert-success" style="margin-bottom:0.85rem">
+            <div>
+              <strong>✅ Safe Conversion (Date → Text):</strong>
+              All dates will be formatted into standard ISO text representations (YYYY-MM-DD).
+            </div>
+          </div>
+        `;
+      }
+
+      const sampleRows = p.sample_pairs || [];
+      let tableHtml = "";
+      if (sampleRows.length > 0) {
+        tableHtml = `
+          <div style="margin-top:0.85rem">
+            <div style="font-size:0.75rem; font-weight:700; color:var(--ink-soft); text-transform:uppercase; letter-spacing:0.04em; margin-bottom:0.4rem">
+              Expected Result Preview (Sample Values)
+            </div>
+            <div style="border:1px solid var(--line); border-radius:8px; overflow:hidden">
+              <table class="data-table" style="font-size:0.78rem">
+                <thead>
+                  <tr>
+                    <th style="width:50px">Row</th>
+                    <th>Current Value (${escHtml(p.current_type)})</th>
+                    <th>Proposed Result (${escHtml(p.target_type)})</th>
+                    <th style="width:85px; text-align:center">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${sampleRows.map(r => `
+                    <tr>
+                      <td style="color:var(--ink-faint); font-weight:600">#${r.row}</td>
+                      <td><code>${escHtml(r.original)}</code></td>
+                      <td><code>${escHtml(r.converted)}</code></td>
+                      <td style="text-align:center">
+                        <span class="badge ${r.status === 'success' ? 'badge-success' : 'badge-danger'}" style="font-size:0.7rem">
+                          ${r.status === 'success' ? '✓ OK' : '✗ Failed'}
+                        </span>
+                      </td>
+                    </tr>
+                  `).join("")}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+      }
+
+      previewCard.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.85rem; padding-bottom:0.65rem; border-bottom:1px solid var(--line)">
+          <div style="display:flex; align-items:center; gap:0.5rem">
+            <span class="badge badge-info" style="font-size:0.78rem">${escHtml(p.current_type)}</span>
+            <span style="color:var(--ink-faint); font-weight:800">➔</span>
+            <span class="badge badge-success" style="font-size:0.78rem">${escHtml(p.target_type)}</span>
+          </div>
+          <div style="font-size:0.75rem; color:var(--ink-soft)">
+            Convertible: <strong>${convertible}/${total}</strong>
+            ${nonConvertible > 0 ? `· <span style="color:var(--danger)">Failed: ${nonConvertible}</span>` : ""}
+          </div>
+        </div>
+
+        ${bannerHtml}
+        ${tableHtml}
+      `;
+
+      btnApplyCol.textContent = `Apply Conversion (${escHtml(col)} → ${escHtml(target)})`;
+      if (p.will_be_empty || (total > 0 && convertible === 0 && nonConvertible > 0)) {
+        btnApplyCol.disabled = true;
+        btnApplyCol.title = "Cannot apply: all values in this column failed conversion.";
+      } else if (requiresCheckbox) {
+        btnApplyCol.disabled = true;
+        const chk = document.getElementById("m-repair-chk-loss");
+        if (chk) chk.onchange = () => { btnApplyCol.disabled = !chk.checked; };
+      } else {
+        btnApplyCol.disabled = false;
+      }
+    }
+
+    if (btnApplyCol) {
+      btnApplyCol.onclick = async () => {
+        const col = colSelConvert.value;
+        const target = targetSel.value;
+        const chkLoss = document.getElementById("m-repair-chk-loss");
+        if (chkLoss && !chkLoss.checked) {
+          showAlert("⚠️ Please check the confirmation checkbox to authorize rounding before applying.", "warning");
+          return;
+        }
+
+        btnApplyCol.disabled = true;
+        btnApplyCol.textContent = "Converting...";
+
+        try {
+          await api.repairType(dataset, col, target);
+          closeModal();
+          if (modalDialog) modalDialog.classList.remove("modal-lg");
+          await updateTopbar(dataset);
+          showAlert(`✓ Converted column '${col}' to ${target}`, "success");
+          await loadCleaningTable(container, dataset);
+        } catch (e) {
+          btnApplyCol.disabled = false;
+          btnApplyCol.textContent = "Apply Conversion";
+          showAlert(e.message, "error");
+        }
+      };
+    }
+
+    if (colSelConvert) colSelConvert.onchange = () => updateTargetDropdown();
+    if (targetSel) targetSel.onchange = () => runPreview();
+
+    // Initial render based on active tab
+    if (activeTab === "tab-fix-values") {
+      await loadTab1();
+    } else {
+      await updateTargetDropdown();
+    }
+
+  } catch (err) {
+    showAlert("Failed to open Repair Data Type modal: " + err.message, "error");
   }
 }
 
@@ -1178,15 +2186,23 @@ async function showSuspiciousModal(dataset, container, defaultCol = null) {
         if (selectedCountEl) selectedCountEl.textContent = "0 selected";
       } else {
         if (selectAllCb) { selectAllCb.checked = false; selectAllCb.disabled = false; }
-        rowsContainer.innerHTML = indices.map((idx, i) => `
-          <label style="display:flex; align-items:center; justify-content:space-between; padding:0.4rem 0.6rem; border-radius:4px; cursor:pointer; background:var(--surface); border:1px solid var(--border-soft); font-size:0.8rem; user-select:none; transition:background 0.15s">
-            <span style="display:flex; align-items:center; gap:0.5rem">
-              <input type="checkbox" class="m-susp-row-cb" value="${idx}" ${i === 0 ? "checked" : ""} style="cursor:pointer; accent-color:var(--primary)">
-              <strong>Row ${idx}</strong>
-            </span>
-            <span style="color:var(--ink-faint); font-family:monospace; font-size:0.75rem">Suspicious Issue</span>
-          </label>
-        `).join("");
+        rowsContainer.innerHTML = indices.map((idx, i) => {
+          const rowDetail = colEntry.issues.flatMap(iss => iss.row_details || []).find(d => d.row === idx);
+          const detailVal = rowDetail && rowDetail.original_value !== undefined ? `"${rowDetail.original_value}"` : "";
+          const detailReason = rowDetail && rowDetail.reason ? rowDetail.reason : "Suspicious Issue";
+          return `
+            <label style="display:flex; align-items:center; justify-content:space-between; padding:0.4rem 0.6rem; border-radius:4px; cursor:pointer; background:var(--surface); border:1px solid var(--border-soft); font-size:0.8rem; user-select:none; transition:background 0.15s">
+              <span style="display:flex; align-items:center; gap:0.5rem">
+                <input type="checkbox" class="m-susp-row-cb" value="${idx}" ${i === 0 ? "checked" : ""} style="cursor:pointer; accent-color:var(--primary)">
+                <strong>Row ${idx}</strong>
+                ${detailVal ? `<span class="badge badge-secondary" style="font-size:0.7rem; font-family:monospace">${escHtml(detailVal)}</span>` : ''}
+              </span>
+              <span style="color:var(--ink-faint); font-size:0.75rem; max-width:55%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap" title="${escHtml(detailReason)}">
+                ${escHtml(detailReason)}
+              </span>
+            </label>
+          `;
+        }).join("");
 
         const updateSelectedCount = () => {
           const cbs = Array.from(rowsContainer.querySelectorAll(".m-susp-row-cb"));

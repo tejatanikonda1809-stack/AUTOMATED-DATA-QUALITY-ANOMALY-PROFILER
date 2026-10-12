@@ -26,6 +26,7 @@ def _empty_dataset_state():
         "analysis": None,
         "original_analysis": None,
         "change_history": [],
+        "kept_cells": set(),
         "resolved_outliers": [],
         "resolved_suspicious": [],
         "state": "empty",  # empty | uploaded | analyzed | finalized
@@ -93,6 +94,7 @@ def set_original(sid: str, dataset_key: str, df: pd.DataFrame, source_info: dict
         sess[dataset_key]["analysis"] = None
         sess[dataset_key]["original_analysis"] = None
         sess[dataset_key]["change_history"] = []
+        sess[dataset_key]["kept_cells"] = set()
         sess[dataset_key]["resolved_outliers"] = []
         sess[dataset_key]["resolved_suspicious"] = []
         sess[dataset_key]["state"] = "uploaded"
@@ -149,6 +151,37 @@ def get_history(sid: str, dataset_key: str) -> list:
         return sess[dataset_key].get("change_history", [])
 
 
+def add_kept_cell(sid: str, dataset_key: str, row_index: int, column: str):
+    """Record a cell user chose to Keep / Leave Unchanged in the shared cross-category registry."""
+    dataset_key = normalize_key(dataset_key)
+    with _lock:
+        sess = _sessions.get(sid)
+        if not sess:
+            return
+        if "kept_cells" not in sess[dataset_key]:
+            sess[dataset_key]["kept_cells"] = set()
+        sess[dataset_key]["kept_cells"].add((int(row_index), str(column)))
+
+
+def get_kept_cells(sid: str, dataset_key: str) -> set:
+    """Get the set of kept (row_index, column) tuples."""
+    dataset_key = normalize_key(dataset_key)
+    with _lock:
+        sess = _sessions.get(sid)
+        if not sess:
+            return set()
+        return set(sess[dataset_key].get("kept_cells", set()))
+
+
+def clear_kept_cells(sid: str, dataset_key: str):
+    dataset_key = normalize_key(dataset_key)
+    with _lock:
+        sess = _sessions.get(sid)
+        if not sess:
+            return
+        sess[dataset_key]["kept_cells"] = set()
+
+
 def add_resolved_outlier(sid: str, dataset_key: str, column: str, row_index: int, value=None):
     dataset_key = normalize_key(dataset_key)
     with _lock:
@@ -160,6 +193,9 @@ def add_resolved_outlier(sid: str, dataset_key: str, column: str, row_index: int
         sess[dataset_key]["resolved_outliers"].append({
             "column": column, "row_index": row_index, "value": value
         })
+        if "kept_cells" not in sess[dataset_key]:
+            sess[dataset_key]["kept_cells"] = set()
+        sess[dataset_key]["kept_cells"].add((int(row_index), str(column)))
 
 
 def add_resolved_suspicious(sid: str, dataset_key: str, column: str, row_index: int, value=None):
@@ -173,6 +209,9 @@ def add_resolved_suspicious(sid: str, dataset_key: str, column: str, row_index: 
         sess[dataset_key]["resolved_suspicious"].append({
             "column": column, "row_index": row_index, "value": value
         })
+        if "kept_cells" not in sess[dataset_key]:
+            sess[dataset_key]["kept_cells"] = set()
+        sess[dataset_key]["kept_cells"].add((int(row_index), str(column)))
 
 
 def adjust_resolved_indices(sid: str, dataset_key: str, deleted_indices: list):
@@ -252,6 +291,8 @@ def filter_resolved_issues(analysis: dict, resolved_outliers: list, resolved_sus
                 if len(remaining_indices) > 0 and new_count > 0:
                     iss["indices"] = remaining_indices
                     iss["count"] = new_count
+                    if "row_details" in iss:
+                        iss["row_details"] = [d for d in iss["row_details"] if d.get("row") not in resolved_rows]
                     new_susp_issues.append(iss)
             else:
                 if col not in resolved_susp_map:
@@ -272,7 +313,22 @@ def filter_resolved_issues(analysis: dict, resolved_outliers: list, resolved_sus
             col = issue.get("column", "")
             if "Outlier" in cat and col and col not in active_outlier_cols:
                 continue
-            if ("Suspicious" in cat or "Invalid" in cat) and col and col not in active_susp_cols:
+            if ("Suspicious" in cat or "Invalid" in cat or "Inconsisten" in cat) and col and col not in active_susp_cols:
+                continue
+            # Keep remaining affected indices in sync
+            if ("Suspicious" in cat or "Invalid" in cat or "Inconsisten" in cat) and col in resolved_susp_map:
+                resolved_rows = resolved_susp_map.get(col, set())
+                rem_idx = [idx for idx in issue.get("affected_indices", []) if idx not in resolved_rows]
+                issue["affected_indices"] = rem_idx
+                issue["count"] = len(rem_idx)
+                if "row_details" in issue:
+                    issue["row_details"] = [d for d in issue["row_details"] if d.get("row") not in resolved_rows]
+            # A card must disappear when its count reaches 0. Never show a count that opens to an empty list.
+            if issue.get("count", 0) <= 0:
+                continue
+            if isinstance(issue.get("affected_indices"), list) and len(issue.get("affected_indices")) == 0 and issue.get("category") in ("Data-Type Issues", "Missing Values", "Duplicate Rows", "Suspicious Values", "Category Inconsistencies", "Potential Outliers"):
+                continue
+            if issue.get("category") in ("Schema Problems", "Schema Issues"):
                 continue
             filtered_issue_center.append(issue)
         filtered["issue_center"] = filtered_issue_center
@@ -353,6 +409,7 @@ def reset_working(sid: str, dataset_key: str):
         if orig is not None:
             sess[dataset_key]["working_df"] = orig.copy()
             sess[dataset_key]["analysis"] = None
+            sess[dataset_key]["kept_cells"] = set()
             sess[dataset_key]["resolved_outliers"] = []
             sess[dataset_key]["resolved_suspicious"] = []
             sess[dataset_key]["state"] = "uploaded"

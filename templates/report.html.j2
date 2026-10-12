@@ -339,7 +339,12 @@
       </thead>
       <tbody>
       {% for s in stats.numerical %}
-        {% if not s.get('insufficient_data') %}
+        {% if s.get('insufficient_data') %}
+        <tr>
+          <td><strong>{{ s.column | wrap_text }}</strong></td>
+          <td colspan="8" style="color:#64748b; font-style:italic">Insufficient data for reliable analysis</td>
+        </tr>
+        {% else %}
         <tr>
           <td><strong>{{ s.column | wrap_text }}</strong></td>
           <td>{{ s.count }}</td>
@@ -379,7 +384,12 @@
       </thead>
       <tbody>
       {% for c in stats.categorical %}
-        {% if not c.get('insufficient_data') %}
+        {% if c.get('insufficient_data') %}
+        <tr>
+          <td><strong>{{ c.column | wrap_text }}</strong></td>
+          <td colspan="5" style="color:#64748b; font-style:italic">Insufficient data for reliable analysis</td>
+        </tr>
+        {% else %}
         <tr>
           <td><strong>{{ c.column | wrap_text }}</strong></td>
           <td>{{ c.count }}</td>

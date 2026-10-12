@@ -52,7 +52,7 @@ function renderSingleReports(container) {
               Print-ready PDF report with Quality Score on page 1, structured summary tables, and full cleaning history.
             </div>
           </div>
-          <button class="btn btn-secondary" id="btn-dl-pdf" style="width:100%">Download PDF Report</button>
+          <button class="btn btn-purple" id="btn-dl-pdf" style="width:100%">Download PDF Report</button>
         </div>
       </div>
 
@@ -78,7 +78,7 @@ function renderSingleReports(container) {
               Dedicated audit spreadsheet (.xlsx) tracking every originally-missing cell, its resolution method, and final state.
             </div>
           </div>
-          <button class="btn btn-secondary" id="btn-dl-missing-log" style="width:100%">Download Missing Log (.xlsx)</button>
+          <button class="btn btn-amber" id="btn-dl-missing-log" style="width:100%">Download Missing Log (.xlsx)</button>
         </div>
       </div>
     </div>
@@ -131,7 +131,7 @@ function renderCompareReports(container) {
               </p>
             </div>
           </div>
-          <button class="btn btn-secondary" id="btn-dl-ref-pdf" style="white-space:nowrap">Download Reference PDF →</button>
+          <button class="btn btn-purple" id="btn-dl-ref-pdf" style="white-space:nowrap">Download Reference PDF →</button>
         </div>
       </div>
 
@@ -148,7 +148,7 @@ function renderCompareReports(container) {
               </p>
             </div>
           </div>
-          <button class="btn btn-secondary" id="btn-dl-cur-pdf" style="white-space:nowrap">Download Current PDF →</button>
+          <button class="btn btn-purple" id="btn-dl-cur-pdf" style="white-space:nowrap">Download Current PDF →</button>
         </div>
       </div>
 
@@ -169,7 +169,7 @@ function renderCompareReports(container) {
           <p style="font-size:0.75rem; color:var(--ink-faint); margin:0.35rem 0 0.75rem">
             Formal PDF audit summarizing schema evolution, data shift, most changed columns, and distribution drift.
           </p>
-          <button class="btn btn-secondary btn-sm" id="btn-dl-comp-pdf">Download Comparison PDF →</button>
+          <button class="btn btn-purple btn-sm" id="btn-dl-comp-pdf">Download Comparison PDF →</button>
         </div>
       </div>
 
@@ -200,14 +200,14 @@ function renderCompareReports(container) {
             <div style="font-weight:700; color:var(--ink)">Reference Missing Log</div>
             <div style="font-size:0.75rem; color:var(--ink-faint)">Audit spreadsheet of missing values &amp; resolutions in Reference</div>
           </div>
-          <button class="btn btn-secondary btn-sm" id="btn-dl-ref-missing-log">Download Ref Log (.xlsx)</button>
+          <button class="btn btn-amber btn-sm" id="btn-dl-ref-missing-log">Download Ref Log (.xlsx)</button>
         </div>
         <div class="stat-card" style="display:flex; align-items:center; justify-content:space-between">
           <div>
             <div style="font-weight:700; color:var(--ink)">Current Missing Log</div>
             <div style="font-size:0.75rem; color:var(--ink-faint)">Audit spreadsheet of missing values &amp; resolutions in Current</div>
           </div>
-          <button class="btn btn-secondary btn-sm" id="btn-dl-cur-missing-log">Download Cur Log (.xlsx)</button>
+          <button class="btn btn-amber btn-sm" id="btn-dl-cur-missing-log">Download Cur Log (.xlsx)</button>
         </div>
       </div>
     </div>

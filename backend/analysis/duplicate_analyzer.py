@@ -24,7 +24,7 @@ def analyze_duplicates(df: pd.DataFrame) -> dict:
                 if len(grp) < 2:
                     continue
                 indices = grp["_row_index"].tolist()
-                row_vals = {col: _safe_val(grp.iloc[0][col]) for col in group_cols}
+                row_vals = {col: _safe_val(grp.iloc[0][col] if len(grp) > 0 else None) for col in group_cols}
                 groups.append({
                     "indices": indices,
                     "count": len(grp),

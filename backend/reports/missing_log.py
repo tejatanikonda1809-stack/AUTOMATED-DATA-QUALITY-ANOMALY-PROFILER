@@ -158,7 +158,7 @@ def build_missing_values_workbook(orig_df: pd.DataFrame, final_df: pd.DataFrame,
                     if id_val in final_by_id.index:
                         row_found = True
                         val_series = final_by_id.loc[id_val, col]
-                        cur_val = val_series.iloc[0] if isinstance(val_series, pd.Series) else val_series
+                        cur_val = (val_series.iloc[0] if len(val_series) > 0 else None) if isinstance(val_series, pd.Series) else val_series
                 
                 if not row_found and orig_r_idx in final_df.index:
                     row_found = True

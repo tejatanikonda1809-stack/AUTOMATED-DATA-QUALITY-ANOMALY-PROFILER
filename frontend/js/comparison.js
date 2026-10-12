@@ -22,7 +22,7 @@ export async function renderComparison(container) {
           </p>
           <div style="display:flex; justify-content:center; gap:0.75rem">
             <button class="btn btn-primary" id="btn-goto-ref">Upload Reference →</button>
-            <button class="btn btn-secondary" id="btn-goto-cur">Upload Current →</button>
+            <button class="btn btn-purple" id="btn-goto-cur">Upload Current →</button>
           </div>
         </div>
       `;
@@ -76,8 +76,8 @@ function renderComparisonDashboard(container, c, isPreview) {
           </div>
         </div>
         <div style="display:flex; gap:0.5rem">
-          <button class="btn btn-secondary btn-sm" id="btn-goto-ref-review">Review Ref</button>
-          <button class="btn btn-secondary btn-sm" id="btn-goto-cur-review">Review Cur</button>
+          <button class="btn btn-primary btn-sm" id="btn-goto-ref-review">Review Ref</button>
+          <button class="btn btn-purple btn-sm" id="btn-goto-cur-review">Review Cur</button>
         </div>
       </div>
     ` : `

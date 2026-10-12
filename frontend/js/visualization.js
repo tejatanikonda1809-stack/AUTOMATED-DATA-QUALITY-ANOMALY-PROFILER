@@ -458,7 +458,7 @@ function renderVizBuilder(container, dataset, avail) {
       <!-- Action Buttons -->
       <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap">
         <button class="btn btn-primary" id="btn-gen-chart">Generate Visualization</button>
-        <button class="btn btn-secondary hidden" id="btn-save-chart">💾 Save to Gallery</button>
+        <button class="btn btn-purple hidden" id="btn-save-chart">💾 Save to Gallery</button>
         <button class="btn btn-ghost btn-sm hidden" id="btn-new-chart">➕ Visualize Another</button>
       </div>
     </div>
@@ -469,7 +469,7 @@ function renderVizBuilder(container, dataset, avail) {
         <span id="chart-title-label">Interactive Visualization</span>
         <div style="display:flex; gap:0.5rem; align-items:center">
           <span class="badge badge-info" id="chart-state-badge">State: Working</span>
-          <button class="btn btn-secondary btn-sm hidden" id="btn-download-png">📷 Export PNG</button>
+          <button class="btn btn-primary btn-sm hidden" id="btn-download-png">📷 Export PNG</button>
         </div>
       </div>
       <div id="plotly-container" style="width:100%; min-height:460px; position:relative">

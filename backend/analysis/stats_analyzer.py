@@ -9,11 +9,18 @@ def analyze_stats(df: pd.DataFrame) -> dict:
     categorical = []
 
     for col in df.columns:
-        series = df[col]
-        if is_numeric_col(series):
-            numerical.append(_numeric_stats(series, col))
-        elif is_categorical_col(series):
-            categorical.append(_categorical_stats(series, col))
+        try:
+            series = df[col]
+            if is_numeric_col(series):
+                numerical.append(_numeric_stats(series, col))
+            elif is_categorical_col(series):
+                categorical.append(_categorical_stats(series, col))
+            else:
+                col_mask = get_missing_mask(series)
+                if len(series[~col_mask]) == 0:
+                    categorical.append({"column": col, "insufficient_data": True, "message": "Insufficient data for reliable analysis"})
+        except Exception:
+            numerical.append({"column": col, "insufficient_data": True, "message": "Insufficient data for reliable analysis"})
 
     return {
         "numerical": numerical,
@@ -27,11 +34,11 @@ def _numeric_stats(series: pd.Series, col: str) -> dict:
     col_mask = get_missing_mask(series)
     non_null = series[~col_mask]
     if len(non_null) == 0:
-        return {"column": col, "insufficient_data": True}
+        return {"column": col, "insufficient_data": True, "message": "Insufficient data for reliable analysis"}
 
     num_vals = pd.to_numeric(non_null, errors="coerce").dropna()
     if len(num_vals) == 0:
-        return {"column": col, "insufficient_data": True}
+        return {"column": col, "insufficient_data": True, "message": "Insufficient data for reliable analysis"}
 
     q1 = float(num_vals.quantile(0.25))
     q2 = float(num_vals.quantile(0.50))
@@ -71,7 +78,7 @@ def _categorical_stats(series: pd.Series, col: str) -> dict:
     col_mask = get_missing_mask(series)
     non_null = series[~col_mask]
     if len(non_null) == 0:
-        return {"column": col, "insufficient_data": True}
+        return {"column": col, "insufficient_data": True, "message": "Insufficient data for reliable analysis"}
 
     vc = non_null.value_counts()
     total = len(non_null)

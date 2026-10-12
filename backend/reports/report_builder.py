@@ -19,7 +19,12 @@ def build_single_report(ds_key: str, source_info: dict, df_original, df_final,
 
     quality_before = (analysis_before or {}).get("quality_score", {})
     quality_after = (analysis_after or {}).get("quality_score", {})
-    issues = (analysis_after or {}).get("issue_center", [])
+    raw_issues = (analysis_after or {}).get("issue_center", [])
+    issues = [
+        i for i in raw_issues
+        if i.get("category") not in ("Schema Problems", "Schema Issues")
+        and (i.get("count", 0) > 0 or len(i.get("affected_indices", [])) > 0)
+    ]
     stats = (analysis_after or {}).get("stats", {})
 
     visualizations = _generate_report_visualizations(df_final, analysis_before, analysis_after)
@@ -60,6 +65,13 @@ def build_analysis_only_report(ref_source: dict, cur_source: dict,
                                 ref_history: list, cur_history: list) -> dict:
     """Build a side-by-side individual analysis report for both datasets (NO comparison content)."""
     from backend.utils.df_utils import df_to_records
+    def _clean_issues(raw):
+        return [
+            i for i in (raw or [])
+            if i.get("category") not in ("Schema Problems", "Schema Issues")
+            and (i.get("count", 0) > 0 or len(i.get("affected_indices", [])) > 0)
+        ]
+
     return {
         "report_type": "analysis_only",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -72,7 +84,7 @@ def build_analysis_only_report(ref_source: dict, cur_source: dict,
             "quality_score": (ref_analysis or {}).get("quality_score", {}),
             "stats": (ref_analysis or {}).get("stats", {}),
             "change_history": ref_history or [],
-            "issues": (ref_analysis or {}).get("issue_center", []),
+            "issues": _clean_issues((ref_analysis or {}).get("issue_center", [])),
             "sample": df_to_records(ref_df, max_rows=50) if ref_df is not None else {},
         },
         "current": {
@@ -83,7 +95,7 @@ def build_analysis_only_report(ref_source: dict, cur_source: dict,
             "quality_score": (cur_analysis or {}).get("quality_score", {}),
             "stats": (cur_analysis or {}).get("stats", {}),
             "change_history": cur_history or [],
-            "issues": (cur_analysis or {}).get("issue_center", []),
+            "issues": _clean_issues((cur_analysis or {}).get("issue_center", [])),
             "sample": df_to_records(cur_df, max_rows=50) if cur_df is not None else {},
         },
     }
@@ -97,6 +109,13 @@ def build_comparison_report(ref_source: dict, cur_source: dict,
                               ref_history: list, cur_history: list,
                               comparison_result: dict) -> dict:
     """Build a complete report data model for a two-dataset comparison."""
+    def _clean_issues(raw):
+        return [
+            i for i in (raw or [])
+            if i.get("category") not in ("Schema Problems", "Schema Issues")
+            and (i.get("count", 0) > 0 or len(i.get("affected_indices", [])) > 0)
+        ]
+
     return {
         "report_type": "comparison",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -115,7 +134,7 @@ def build_comparison_report(ref_source: dict, cur_source: dict,
             "quality_after": (ref_analysis_after or {}).get("quality_score", {}),
             "stats": (ref_analysis_after or {}).get("stats", {}),
             "change_history": ref_history or [],
-            "issues_after": (ref_analysis_after or {}).get("issue_center", []),
+            "issues_after": _clean_issues((ref_analysis_after or {}).get("issue_center", [])),
         },
         "current": {
             "source_info": cur_source,
@@ -131,7 +150,7 @@ def build_comparison_report(ref_source: dict, cur_source: dict,
             "quality_after": (cur_analysis_after or {}).get("quality_score", {}),
             "stats": (cur_analysis_after or {}).get("stats", {}),
             "change_history": cur_history or [],
-            "issues_after": (cur_analysis_after or {}).get("issue_center", []),
+            "issues_after": _clean_issues((cur_analysis_after or {}).get("issue_center", [])),
         },
         "comparison": comparison_result or {},
     }

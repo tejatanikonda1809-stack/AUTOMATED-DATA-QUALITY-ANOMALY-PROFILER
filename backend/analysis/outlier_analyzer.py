@@ -1,40 +1,47 @@
 """Outlier and anomaly detection using IQR and Z-score."""
 import pandas as pd
 import numpy as np
-from backend.utils.df_utils import is_numeric_col, is_identifier_col, clean_numeric_series, safe_json_val
+from backend.utils.df_utils import is_numeric_col, is_identifier_col, clean_numeric_series, safe_json_val, get_missing_mask
 
 
-def analyze_outliers(df: pd.DataFrame) -> dict:
+def analyze_outliers(df: pd.DataFrame, kept_cells: set = None) -> dict:
     results = []
+    kept = kept_cells or set()
     for col in df.columns:
-        series = df[col]
-        if not is_numeric_col(series) or is_identifier_col(series, col):
+        try:
+            series = df[col]
+            if not is_numeric_col(series) or is_identifier_col(series, col):
+                continue
+
+            num_series = clean_numeric_series(series)
+            mask = get_missing_mask(series)
+            non_null = num_series[~mask].dropna()
+            if len(non_null) < 5:
+                continue
+
+            iqr_result = _iqr_outliers(num_series, col)
+            zscore_result = _zscore_outliers(num_series, col)
+
+            # Combine
+            raw_indices = list(set(iqr_result["indices"] + zscore_result["indices"]))
+            # Exclude missing cells and kept cells using stable index labels
+            all_indices = [int(i) for i in raw_indices if (int(i), col) not in kept and (i in num_series.index and pd.notna(num_series.loc[i]))]
+
+            if len(all_indices) == 0:
+                continue
+
+            results.append({
+                "column": col,
+                "iqr": iqr_result,
+                "zscore": zscore_result,
+                "combined_indices": all_indices,
+                "combined_count": len(all_indices),
+                "affected_pct": round(len(all_indices) / len(series) * 100, 2),
+                "total_non_null": int(len(non_null)),
+                "outlier_values": _outlier_values(num_series, all_indices),
+            })
+        except Exception:
             continue
-            
-        num_series = clean_numeric_series(series)
-        non_null = num_series.dropna()
-        if len(non_null) < 5:
-            continue
-
-        iqr_result = _iqr_outliers(num_series, col)
-        zscore_result = _zscore_outliers(num_series, col)
-
-        # Combine
-        all_indices = list(set(iqr_result["indices"] + zscore_result["indices"]))
-
-        if len(all_indices) == 0:
-            continue
-
-        results.append({
-            "column": col,
-            "iqr": iqr_result,
-            "zscore": zscore_result,
-            "combined_indices": all_indices,
-            "combined_count": len(all_indices),
-            "affected_pct": round(len(all_indices) / len(series) * 100, 2),
-            "total_non_null": int(len(non_null)),
-            "outlier_values": _outlier_values(num_series, all_indices),
-        })
 
     return {
         "columns_with_outliers": len(results),
@@ -92,8 +99,9 @@ def _outlier_values(series: pd.Series, indices: list) -> list:
     vals = []
     for idx in indices[:20]:  # cap at 20
         try:
-            v = series.iloc[idx] if idx < len(series) else series.loc[idx]
-            vals.append({"index": idx, "value": safe_json_val(v)})
+            if idx in series.index:
+                v = series.loc[idx]
+                vals.append({"index": idx, "value": safe_json_val(v)})
         except Exception:
             pass
     return vals

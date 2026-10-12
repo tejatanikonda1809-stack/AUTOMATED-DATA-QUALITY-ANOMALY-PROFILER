@@ -76,7 +76,7 @@ function renderAnalysis(container, a, dataset) {
     <div class="grid-4">
       <div class="stat-card"><div class="stat-label">Type Issues</div><div class="stat-value" style="color:${types.columns_with_issues ? '#f97316' : '#22c55e'}">${types.columns_with_issues ?? 0}</div><div class="stat-sub">columns affected</div></div>
       <div class="stat-card"><div class="stat-label">Outlier Columns</div><div class="stat-value" style="color:#3b82f6">${outliers.columns_with_outliers ?? 0}</div><div class="stat-sub">potential anomalies</div></div>
-      <div class="stat-card"><div class="stat-label">Issues Total</div><div class="stat-value">${(a.issue_center || []).length}</div><div class="stat-sub">detected issues</div></div>
+      <div class="stat-card"><div class="stat-label">Issues Total</div><div class="stat-value">${(a.issue_center || []).filter(i => (i.count ?? 0) > 0 && i.category !== 'Schema Problems' && i.category !== 'Schema Issues').length}</div><div class="stat-sub">detected issues</div></div>
       <div class="stat-card"><div class="stat-label">Empty Rows</div><div class="stat-value">${schema.empty_rows ?? 0}</div></div>
     </div>
 
@@ -111,7 +111,12 @@ function renderAnalysis(container, a, dataset) {
         <table class="data-table">
           <thead><tr><th>Column</th><th>Count</th><th>Mean</th><th>Median</th><th>Std</th><th>Min</th><th>Max</th><th>IQR</th><th>Skewness</th></tr></thead>
           <tbody>
-            ${stats.numerical.filter(s => !s.insufficient_data).map(s => `
+            ${stats.numerical.map(s => s.insufficient_data ? `
+              <tr>
+                <td><strong>${escHtml(s.column)}</strong></td>
+                <td colspan="8" style="color:var(--ink-faint); font-style:italic">Insufficient data for reliable analysis</td>
+              </tr>
+            ` : `
               <tr>
                 <td><strong>${escHtml(s.column)}</strong></td>
                 <td>${s.count}</td>
@@ -129,13 +134,41 @@ function renderAnalysis(container, a, dataset) {
       </div>
     </div>` : ""}
 
+    <!-- Categorical Stats -->
+    ${stats.categorical && stats.categorical.length ? `
+    <div class="card">
+      <div class="card-title">📊 Categorical Statistics</div>
+      <div class="data-table-wrap">
+        <table class="data-table">
+          <thead><tr><th>Column</th><th>Count</th><th>Missing</th><th>Unique</th><th>Most Common</th><th>Top Frequency</th></tr></thead>
+          <tbody>
+            ${stats.categorical.map(c => c.insufficient_data ? `
+              <tr>
+                <td><strong>${escHtml(c.column)}</strong></td>
+                <td colspan="5" style="color:var(--ink-faint); font-style:italic">Insufficient data for reliable analysis</td>
+              </tr>
+            ` : `
+              <tr>
+                <td><strong>${escHtml(c.column)}</strong></td>
+                <td>${c.count}</td>
+                <td>${c.missing}</td>
+                <td>${c.unique_count}</td>
+                <td>${escHtml(c.most_common ?? "—")}</td>
+                <td>${c.most_common_count}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>` : ""}
+
     <!-- Quick Actions -->
     <div class="card">
       <div class="card-title">⚡ Next Steps</div>
       <div style="display:flex; flex-wrap:wrap; gap:0.75rem">
         <button class="btn btn-warning" id="btn-go-issues">⚠️ View Issue Center</button>
-        <button class="btn btn-secondary" id="btn-go-viz">📈 Visualize Data</button>
-        <button class="btn btn-secondary" id="btn-go-clean">🧹 Cleaning Studio</button>
+        <button class="btn btn-purple" id="btn-go-viz">📈 Visualize Data</button>
+        <button class="btn btn-primary" id="btn-go-clean">🧹 Cleaning Studio</button>
         <button class="btn btn-ghost" id="btn-reanalyze">🔄 Re-Analyze</button>
       </div>
     </div>

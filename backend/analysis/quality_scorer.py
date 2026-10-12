@@ -51,7 +51,21 @@ def compute_quality_score(df: pd.DataFrame, analysis: dict) -> dict:
 
     # 4. Suspicious values penalty (up to 15 pts)
     susp_info = analysis.get("suspicious", {})
-    susp_count = susp_info.get("total_suspicious_count", 0)
+    # Avoid double-penalizing cells already penalized under Data-Type issues
+    type_cells = set()
+    for t_issue in analysis.get("types", {}).get("type_issues", []):
+        t_col = t_issue.get("column")
+        for idx in t_issue.get("affected_indices", []):
+            type_cells.add((idx, t_col))
+
+    susp_cells = set()
+    for s_issue in susp_info.get("suspicious_issues", []):
+        s_col = s_issue.get("column")
+        for idx in s_issue.get("indices", []):
+            if (idx, s_col) not in type_cells:
+                susp_cells.add((idx, s_col))
+
+    susp_count = len(susp_cells) if susp_info.get("suspicious_issues") else susp_info.get("total_suspicious_count", 0)
     total_cells = df.size
     susp_pct = susp_count / total_cells * 100 if total_cells > 0 else 0
     susp_penalty = min(15, susp_pct * 3)
@@ -61,18 +75,6 @@ def compute_quality_score(df: pd.DataFrame, analysis: dict) -> dict:
         "value": f"{susp_count} suspicious value(s) detected",
         "weight": 15,
         "explanation": "Suspicious values (placeholders, extreme outliers) may indicate data quality problems.",
-    })
-
-    # 5. Schema issues penalty (up to 10 pts)
-    schema_info = analysis.get("schema", {})
-    schema_issues = len(schema_info.get("schema_issues", []))
-    schema_penalty = min(10, schema_issues * 2.5)
-    factors.append({
-        "name": "Schema Issues",
-        "penalty": round(schema_penalty, 2),
-        "value": f"{schema_issues} schema issue(s) detected",
-        "weight": 10,
-        "explanation": "Schema problems (empty columns, constant columns) reduce dataset utility.",
     })
 
     # Note about outliers
@@ -103,7 +105,6 @@ def compute_quality_score(df: pd.DataFrame, analysis: dict) -> dict:
             "duplicate_penalty": factors[1]["penalty"],
             "type_penalty": factors[2]["penalty"],
             "suspicious_penalty": factors[3]["penalty"],
-            "schema_penalty": factors[4]["penalty"],
         },
         "factors": factors,
     }

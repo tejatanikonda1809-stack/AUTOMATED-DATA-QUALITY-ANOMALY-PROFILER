@@ -344,7 +344,18 @@ export function showAlert(msg, type = "info", container = null) {
   }
 }
 
-export function showModal({ title, body, onConfirm, confirmText = "Confirm", confirmClass = "btn-primary", showCancel = true, autoClose = true }) {
+export function showModal({
+  title,
+  body,
+  onConfirm,
+  confirmText = "Confirm",
+  confirmClass = "btn-primary",
+  showConfirm = true,
+  showCancel = true,
+  cancelText = "Cancel",
+  autoClose = true,
+  onCancel = null,
+}) {
   const backdrop = document.getElementById("modal-backdrop");
   document.getElementById("modal-title").textContent = title;
   document.getElementById("modal-body").innerHTML = body;
@@ -352,14 +363,20 @@ export function showModal({ title, body, onConfirm, confirmText = "Confirm", con
   const cancelBtn = document.getElementById("modal-cancel");
   confirmBtn.textContent = confirmText;
   confirmBtn.className = `btn ${confirmClass}`;
+  confirmBtn.style.display = showConfirm ? "" : "none";
+  cancelBtn.textContent = cancelText;
   cancelBtn.className = "btn btn-secondary";
   cancelBtn.style.display = showCancel ? "" : "none";
   confirmBtn.onclick = async () => {
     if (autoClose) backdrop.classList.add("hidden");
     if (onConfirm) await onConfirm();
   };
-  cancelBtn.onclick = () => backdrop.classList.add("hidden");
-  document.getElementById("modal-close").onclick = () => backdrop.classList.add("hidden");
+  const handleClose = () => {
+    backdrop.classList.add("hidden");
+    if (onCancel) onCancel();
+  };
+  cancelBtn.onclick = handleClose;
+  document.getElementById("modal-close").onclick = handleClose;
   backdrop.classList.remove("hidden");
 }
 

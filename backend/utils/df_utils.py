@@ -71,8 +71,27 @@ def is_datetime_col(series: pd.Series) -> bool:
     return pd.api.types.is_datetime64_any_dtype(series)
 
 
+import decimal
+
+
+def round_half_up(val):
+    """Round float to nearest integer using round-half-up (e.g. 2.5 -> 3, -2.5 -> -3)."""
+    if val is None or pd.isna(val):
+        return None
+    try:
+        f = float(val)
+        d = decimal.Decimal(str(f))
+        return int(d.quantize(decimal.Decimal('1'), rounding=decimal.ROUND_HALF_UP))
+    except Exception:
+        try:
+            f = float(val)
+            return int(np.floor(f + 0.5) if f >= 0 else np.ceil(f - 0.5))
+        except Exception:
+            return None
+
+
 def df_to_records(df: pd.DataFrame, max_rows: int = 500, page: int = 0) -> dict:
-    """Serialize a DataFrame slice to JSON-safe records."""
+    """Serialize a DataFrame slice to JSON-safe records with stable row IDs."""
     total = len(df)
     start = page * max_rows
     end = start + max_rows
@@ -81,7 +100,7 @@ def df_to_records(df: pd.DataFrame, max_rows: int = 500, page: int = 0) -> dict:
 
     records = []
     for idx, row in slice_df.iterrows():
-        rec = {}
+        rec = {"_row_id": int(idx)}
         for col in slice_df.columns:
             val = row[col]
             is_miss = mask_df.at[idx, col] if col in mask_df.columns else pd.isna(val)
@@ -98,6 +117,7 @@ def df_to_records(df: pd.DataFrame, max_rows: int = 500, page: int = 0) -> dict:
         records.append(rec)
     return {
         "records": records,
+        "row_indices": [int(i) for i in slice_df.index],
         "total": total,
         "page": page,
         "page_size": max_rows,

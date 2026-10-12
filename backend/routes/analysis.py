@@ -27,15 +27,18 @@ def analyze():
         return jsonify({"error": "No dataset found. Please upload first."}), 404
 
     try:
-        result = run_full_analysis(df)
+        kept_cells = sm.get_kept_cells(sid, dataset_key)
+        result = run_full_analysis(df, kept_cells=kept_cells)
         sm.set_analysis(sid, dataset_key, result)
         if sm.get_original_analysis(sid, dataset_key) is None:
             sm.set_original_analysis(sid, dataset_key, result)
         filtered = sm.get_analysis(sid, dataset_key)
         return jsonify({"analysis": filtered if filtered is not None else result})
     except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        import traceback, logging
+        logging.getLogger(__name__).error("Failed to compute analysis:\n%s", traceback.format_exc())
+        traceback.print_exc()
+        return jsonify({"error": f"Failed to compute analysis: {str(e)}"}), 500
 
 
 @bp.route("/analysis/result", methods=["GET"])
@@ -49,14 +52,17 @@ def get_analysis():
         if result is None:
             df = sm.get_working_df(sid, dataset_key)
             if df is not None:
-                raw_analysis = run_full_analysis(df)
+                kept_cells = sm.get_kept_cells(sid, dataset_key)
+                raw_analysis = run_full_analysis(df, kept_cells=kept_cells)
                 sm.set_analysis(sid, dataset_key, raw_analysis)
                 result = sm.get_analysis(sid, dataset_key)
             else:
                 return jsonify({"error": "No dataset loaded. Please upload a dataset first."}), 404
         return jsonify({"analysis": result})
     except Exception as e:
-        import traceback; traceback.print_exc()
+        import traceback, logging
+        logging.getLogger(__name__).error("Failed to compute analysis:\n%s", traceback.format_exc())
+        traceback.print_exc()
         return jsonify({"error": f"Failed to compute analysis: {str(e)}"}), 500
 
 
@@ -132,14 +138,53 @@ def affected_rows():
 
         if existing:
             subset = df.loc[existing]
-        elif int_indices:
-            # Fallback to positional indices
-            valid_pos = [i for i in int_indices if 0 <= i < len(df)]
-            subset = df.iloc[valid_pos] if valid_pos else df.iloc[0:0]
         else:
             subset = df.iloc[0:0]
 
-        return jsonify(df_to_records(subset, max_rows=max(len(subset) + 1, 10)))
+        # Compute cross-category flags and per-cell reason details for rows
+        row_flags = {}
+        cell_flags = {}
+        analysis = sm.get_analysis(sid, dataset_key)
+        if analysis and "issue_center" in analysis:
+            for issue in analysis["issue_center"]:
+                cat = issue.get("category")
+                col = issue.get("column")
+                label = f"{cat} ('{col}')" if col else cat
+                for r_idx in issue.get("affected_indices", []):
+                    try:
+                        r_int = int(r_idx)
+                        if r_int not in row_flags:
+                            row_flags[r_int] = []
+                        if label not in row_flags[r_int]:
+                            row_flags[r_int].append(label)
+                    except (ValueError, TypeError):
+                        pass
+
+                for d in issue.get("row_details", []):
+                    r_d = d.get("row")
+                    if r_d is not None and col:
+                        try:
+                            r_d_int = int(r_d)
+                            if r_d_int not in cell_flags:
+                                cell_flags[r_d_int] = {}
+                            cell_flags[r_d_int][col] = {
+                                "reason": d.get("reason"),
+                                "severity": d.get("severity"),
+                                "original_value": d.get("original_value"),
+                                "category": cat,
+                            }
+                        except (ValueError, TypeError):
+                            pass
+
+        records_data = df_to_records(subset, max_rows=max(len(subset) + 1, 10))
+        for rec in records_data.get("records", []):
+            rid = rec.get("_row_id")
+            rec["_also_flagged"] = row_flags.get(rid, [])
+            rec["_cell_flags"] = cell_flags.get(rid, {})
+        records_data["row_flags"] = row_flags
+        records_data["cell_flags"] = cell_flags
+
+        return jsonify(records_data)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 

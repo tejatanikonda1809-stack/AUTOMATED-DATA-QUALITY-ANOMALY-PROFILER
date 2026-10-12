@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from backend.analysis.missing_analyzer import compute_imputation_value
 from backend.analysis.type_analyzer import preview_type_conversion
-from backend.utils.df_utils import is_numeric_col, can_be_numeric, clean_numeric_series, get_missing_mask
+from backend.utils.df_utils import is_numeric_col, can_be_numeric, clean_numeric_series, get_missing_mask, round_half_up
 
 
 def edit_cell(df: pd.DataFrame, row_index: int, column: str, new_value) -> tuple[pd.DataFrame, dict]:
@@ -67,7 +67,7 @@ def resolve_outlier(df: pd.DataFrame, row_index: int, column: str, resolution: s
         return df, entries
         
     elif resolution == "delete_row":
-        df = df.drop(index=[row_index]).reset_index(drop=True)
+        df = df.drop(index=[row_index])
         entries.append({
             "action": "DELETE_ROWS",
             "method": "Outlier removal",
@@ -138,7 +138,7 @@ def delete_rows(df: pd.DataFrame, row_indices: list) -> tuple[pd.DataFrame, dict
     existing = [i for i in row_indices if i in df.index]
     if not existing:
         raise ValueError("None of the specified row indices exist.")
-    df = df.drop(index=existing).reset_index(drop=True)
+    df = df.drop(index=existing)
     return df, {
         "action": "DELETE_ROWS",
         "description": f"Deleted {len(existing)} row(s): {existing[:10]}{'...' if len(existing) > 10 else ''}",
@@ -245,7 +245,7 @@ def fill_missing(df: pd.DataFrame, column: str, method: str, manual_value=None) 
 def remove_duplicates(df: pd.DataFrame, keep: str = "first") -> tuple[pd.DataFrame, dict]:
     """Remove exact duplicate rows, keeping first occurrence."""
     before = len(df)
-    df = df.drop_duplicates(keep=keep).reset_index(drop=True)
+    df = df.drop_duplicates(keep=keep)
     after = len(df)
     removed = before - after
     return df, {
@@ -261,27 +261,61 @@ def repair_type(df: pd.DataFrame, column: str, target_type: str) -> tuple[pd.Dat
         raise ValueError(f"Column '{column}' not found.")
     original_dtype = str(df[column].dtype)
     df = df.copy()
+
+    target_clean = str(target_type).strip().lower()
+    target_norm_map = {
+        "float": "float64", "float64": "float64", "numeric": "float64",
+        "int": "int64", "int64": "int64", "integer": "int64",
+        "str": "str", "string": "str", "text": "str",
+        "datetime": "datetime64", "datetime64": "datetime64", "date": "datetime64"
+    }
+    target = target_norm_map.get(target_clean, target_type)
+
+    non_null_before = int(df[column].notna().sum())
+
     try:
-        if target_type in ("float64", "numeric"):
-            df[column] = clean_numeric_series(df[column])
-        elif target_type == "int64":
-            df[column] = clean_numeric_series(df[column]).astype("Int64")
-        elif target_type == "datetime64":
+        if target in ("float64", "numeric"):
+            df[column] = pd.to_numeric(clean_numeric_series(df[column]), errors="coerce").astype(float)
+        elif target == "int64":
+            num_clean = clean_numeric_series(df[column])
+            coerced = pd.to_numeric(num_clean, errors="coerce")
+            df[column] = coerced.apply(lambda v: round_half_up(v) if pd.notna(v) else v).astype("Int64")
+        elif target == "datetime64":
             df[column] = pd.to_datetime(df[column], errors="coerce")
-        elif target_type == "str":
-            df[column] = df[column].astype(str)
+        elif target == "str":
+            if pd.api.types.is_datetime64_any_dtype(df[column]):
+                df[column] = df[column].dt.strftime("%Y-%m-%d").where(df[column].notna(), None)
+            elif pd.api.types.is_numeric_dtype(df[column]):
+                def _fmt_clean_str(v):
+                    if pd.isna(v): return None
+                    if isinstance(v, (float, np.floating)) and float(v).is_integer():
+                        return str(int(v))
+                    return str(v)
+                df[column] = df[column].apply(_fmt_clean_str)
+            else:
+                df[column] = df[column].astype(str).replace({"nan": None, "None": None, "<NA>": None})
         else:
-            df[column] = df[column].astype(target_type, errors="ignore")
+            df[column] = df[column].astype(target, errors="ignore")
     except Exception as e:
         raise ValueError(f"Could not convert '{column}' to {target_type}: {e}")
 
+    non_null_after = int(df[column].notna().sum())
+    if non_null_before > 0 and non_null_after == 0:
+        raise ValueError(f"Type conversion to {target_type} failed for all values in '{column}'. Conversion would leave the column entirely empty.")
+
+    failed_count = max(0, non_null_before - non_null_after)
+    desc = f"Converted '{column}' from {original_dtype} to {target}."
+    if failed_count > 0:
+        desc = f"Converted '{column}' from {original_dtype} to {target} ({failed_count} unparseable value(s) converted to null)."
+
     return df, {
         "action": "REPAIR_TYPE",
-        "description": f"Converted '{column}' from {original_dtype} to {target_type}.",
+        "description": desc,
         "column": column,
         "original_value": original_dtype,
-        "new_value": target_type,
+        "new_value": target,
         "method": "type_conversion",
+        "failed_count": failed_count,
     }
 
 
@@ -309,7 +343,7 @@ def resolve_suspicious_value(df: pd.DataFrame, row_index: int, column: str, reso
     entries = []
 
     if resolution == "delete_row":
-        df = df.drop(index=[row_index]).reset_index(drop=True)
+        df = df.drop(index=[row_index])
         entries.append({
             "action": "DELETE_ROWS",
             "method": "Suspicious value removal",
@@ -382,7 +416,7 @@ def delete_column_missing_rows(df: pd.DataFrame, column: str) -> tuple[pd.DataFr
     if not missing_indices:
         raise ValueError(f"No missing values found in column '{column}'.")
 
-    df = df.drop(index=missing_indices).reset_index(drop=True)
+    df = df.drop(index=missing_indices)
     return df, {
         "action": "DELETE_ROWS_BY_COLUMN",
         "description": f"Deleted {len(missing_indices)} row(s) where column '{column}' was missing.",
