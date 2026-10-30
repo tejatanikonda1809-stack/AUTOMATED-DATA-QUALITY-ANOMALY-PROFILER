@@ -1,5 +1,6 @@
 /* app.js — Main application router, sidebar, topbar, and state manager */
 import * as api from "./api.js";
+import { initMobileApp } from "./mobile-app.js";
 
 // ===== GLOBAL STATE =====
 export const state = {
@@ -29,6 +30,8 @@ const ICONS = {
 export async function initApp() {
   initThemeSwitcher();
   init3DTilt();
+  // Mobile app detection + drawer — must run before first renderSidebar()
+  initMobileApp();
   const res = await api.newSession();
   state.sessionId = res.session_id;
   window._sessionId = res.session_id;

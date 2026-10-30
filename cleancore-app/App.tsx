@@ -7,11 +7,12 @@ import {
   Modal,
   TextInput,
   ActivityIndicator,
-  SafeAreaView,
   Platform,
   Alert,
+  StatusBar as RNStatusBar,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as FileSystem from "expo-file-system";
 import * as Sharing from "expo-sharing";
@@ -184,6 +185,29 @@ export default function App() {
     }
   };
 
+  // Appends ?app=mobile to the server URL so the web frontend can detect the mobile app
+  const mobileUrl = (base: string): string => {
+    if (!base) return base;
+    try {
+      const u = new URL(base);
+      u.searchParams.set("app", "mobile");
+      return u.toString();
+    } catch {
+      // Fallback for environments where URL constructor isn't available
+      const sep = base.includes("?") ? "&" : "?";
+      return `${base}${sep}app=mobile`;
+    }
+  };
+
+  // Script injected BEFORE page content loads — sets window flag so the web page
+  // knows it is inside CleanCore Mobile (faster than waiting for DOMContentLoaded)
+  const injectedJsBeforeContent = `
+    (function() {
+      try { window.__CLEANCORE_MOBILE_APP__ = true; } catch(e) {}
+    })();
+    true;
+  `;
+
   // Injected JavaScript inside the original web app to bridge downloads and window.open calls to native
   const injectedJs = `
     (function() {
@@ -341,7 +365,7 @@ export default function App() {
       <>
         <WebView
           ref={webViewRef}
-          source={{ uri: serverUrl }}
+          source={{ uri: mobileUrl(serverUrl) }}
           style={styles.webview}
           javaScriptEnabled={true}
           domStorageEnabled={true}
@@ -349,6 +373,10 @@ export default function App() {
           allowFileAccessFromFileURLs={true}
           originWhitelist={["*"]}
           mixedContentMode="always"
+          // Append " CleanCoreMobile" to the user-agent so the web page can detect us
+          applicationNameForUserAgent="CleanCoreMobile"
+          // Set window.__CLEANCORE_MOBILE_APP__ = true before any page script runs
+          injectedJavaScriptBeforeContentLoaded={injectedJsBeforeContent}
           injectedJavaScript={injectedJs}
           onLoadStart={() => setWebViewLoading(true)}
           onLoadEnd={() => setWebViewLoading(false)}
@@ -406,124 +434,126 @@ export default function App() {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar style="light" />
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.container} edges={["top", "left", "right"]}>
+        <StatusBar style="light" />
 
-      {/* ── Top bar: brand + server pill ── */}
-      <View style={styles.statusBar}>
-        <View style={styles.brandRow}>
-          <View style={styles.brandBadge}>
-            <MaterialCommunityIcons name="layers-triple-outline" size={16} color="#38bdf8" />
-          </View>
-          <Text style={styles.brandText}>CleanCore Mobile</Text>
-        </View>
-
-        <TouchableOpacity style={styles.serverPill} onPress={openConfig} activeOpacity={0.8}>
-          {isChecking ? (
-            <ActivityIndicator size="small" color="#38bdf8" style={{ marginRight: 4 }} />
-          ) : (
-            <View style={[styles.dot, { backgroundColor: isOnline ? "#10b981" : "#ef4444" }]} />
-          )}
-          <Text style={styles.serverUrlText} numberOfLines={1}>
-            {serverUrl ? serverUrl.replace(/^https?:\/\//, "") : "Not configured"}
-          </Text>
-          <Feather name="settings" size={13} color="#94a3b8" />
-        </TouchableOpacity>
-      </View>
-
-      {/* ── Body ── */}
-      <View style={styles.content}>
-        {renderBody()}
-
-        {/* Download overlay */}
-        {downloadingFile && (
-          <View style={styles.downloadOverlay}>
-            <ActivityIndicator size="large" color="#38bdf8" />
-            <Text style={styles.downloadText}>Downloading & Preparing {downloadingFile}…</Text>
-          </View>
-        )}
-      </View>
-
-      {/* ── Server Configuration Modal ── */}
-      <Modal visible={isConfigOpen} transparent animationType="fade" onRequestClose={() => setIsConfigOpen(false)}>
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <View style={styles.modalHeader}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                <MaterialCommunityIcons name="server-network" size={20} color="#38bdf8" />
-                <Text style={styles.modalTitle}>CleanCore Server Configuration</Text>
-              </View>
-              <TouchableOpacity onPress={() => setIsConfigOpen(false)}>
-                <Feather name="x" size={20} color="#94a3b8" />
-              </TouchableOpacity>
+        {/* ── Top bar: brand + server pill ── */}
+        <View style={styles.statusBar}>
+          <View style={styles.brandRow}>
+            <View style={styles.brandBadge}>
+              <MaterialCommunityIcons name="layers-triple-outline" size={16} color="#38bdf8" />
             </View>
+            <Text style={styles.brandText}>CleanCore Mobile</Text>
+          </View>
 
-            <Text style={styles.modalDesc}>
-              CleanCore's Python Flask backend runs on your laptop (port 5000).{"\n"}
-              Enter your laptop's local IP address below.
-            </Text>
-
-            <View style={styles.quickOptions}>
-              <TouchableOpacity
-                style={styles.quickBtn}
-                onPress={() => setInputUrl("http://10.0.2.2:5000")}
-              >
-                <Text style={styles.quickBtnText}>Emulator (10.0.2.2)</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.quickBtn}
-                onPress={() => setInputUrl("http://localhost:5000")}
-              >
-                <Text style={styles.quickBtnText}>Localhost (Web)</Text>
-              </TouchableOpacity>
-            </View>
-
-            <TextInput
-              style={styles.modalInput}
-              value={inputUrl}
-              onChangeText={setInputUrl}
-              placeholder="http://192.168.1.X:5000"
-              placeholderTextColor="#64748b"
-              autoCapitalize="none"
-              autoCorrect={false}
-              keyboardType="url"
-            />
-
-            {testMessage && (
-              <View
-                style={[
-                  styles.testMsgBox,
-                  { backgroundColor: testMessage.ok ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)" },
-                ]}
-              >
-                <Feather
-                  name={testMessage.ok ? "check-circle" : "alert-triangle"}
-                  size={15}
-                  color={testMessage.ok ? "#10b981" : "#ef4444"}
-                />
-                <Text style={[styles.testMsgText, { color: testMessage.ok ? "#10b981" : "#ef4444" }]}>
-                  {testMessage.text}
-                </Text>
-              </View>
+          <TouchableOpacity style={styles.serverPill} onPress={openConfig} activeOpacity={0.8}>
+            {isChecking ? (
+              <ActivityIndicator size="small" color="#38bdf8" style={{ marginRight: 4 }} />
+            ) : (
+              <View style={[styles.dot, { backgroundColor: isOnline ? "#10b981" : "#ef4444" }]} />
             )}
+            <Text style={styles.serverUrlText} numberOfLines={1}>
+              {serverUrl ? serverUrl.replace(/^https?:\/\//, "") : "Not configured"}
+            </Text>
+            <Feather name="settings" size={13} color="#94a3b8" />
+          </TouchableOpacity>
+        </View>
 
-            <View style={styles.modalFooter}>
-              <TouchableOpacity style={styles.btnTest} onPress={handleTestPing} disabled={isTesting}>
-                {isTesting ? (
-                  <ActivityIndicator size="small" color="#38bdf8" />
-                ) : (
-                  <Text style={styles.btnTestText}>Test Ping</Text>
-                )}
-              </TouchableOpacity>
+        {/* ── Body ── */}
+        <View style={styles.content}>
+          {renderBody()}
 
-              <TouchableOpacity style={styles.btnSave} onPress={handleSaveUrl}>
-                <Text style={styles.btnSaveText}>Save & Connect</Text>
-              </TouchableOpacity>
+          {/* Download overlay */}
+          {downloadingFile && (
+            <View style={styles.downloadOverlay}>
+              <ActivityIndicator size="large" color="#38bdf8" />
+              <Text style={styles.downloadText}>Downloading & Preparing {downloadingFile}…</Text>
+            </View>
+          )}
+        </View>
+
+        {/* ── Server Configuration Modal ── */}
+        <Modal visible={isConfigOpen} transparent animationType="fade" onRequestClose={() => setIsConfigOpen(false)}>
+          <View style={styles.modalBackdrop}>
+            <View style={styles.modalCard}>
+              <View style={styles.modalHeader}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                  <MaterialCommunityIcons name="server-network" size={20} color="#38bdf8" />
+                  <Text style={styles.modalTitle}>CleanCore Server Configuration</Text>
+                </View>
+                <TouchableOpacity onPress={() => setIsConfigOpen(false)}>
+                  <Feather name="x" size={20} color="#94a3b8" />
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.modalDesc}>
+                CleanCore's Python Flask backend runs on your laptop (port 5000).{"\n"}
+                Enter your laptop's local IP address below.
+              </Text>
+
+              <View style={styles.quickOptions}>
+                <TouchableOpacity
+                  style={styles.quickBtn}
+                  onPress={() => setInputUrl("http://10.0.2.2:5000")}
+                >
+                  <Text style={styles.quickBtnText}>Emulator (10.0.2.2)</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.quickBtn}
+                  onPress={() => setInputUrl("http://localhost:5000")}
+                >
+                  <Text style={styles.quickBtnText}>Localhost (Web)</Text>
+                </TouchableOpacity>
+              </View>
+
+              <TextInput
+                style={styles.modalInput}
+                value={inputUrl}
+                onChangeText={setInputUrl}
+                placeholder="http://192.168.1.X:5000"
+                placeholderTextColor="#64748b"
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="url"
+              />
+
+              {testMessage && (
+                <View
+                  style={[
+                    styles.testMsgBox,
+                    { backgroundColor: testMessage.ok ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)" },
+                  ]}
+                >
+                  <Feather
+                    name={testMessage.ok ? "check-circle" : "alert-triangle"}
+                    size={15}
+                    color={testMessage.ok ? "#10b981" : "#ef4444"}
+                  />
+                  <Text style={[styles.testMsgText, { color: testMessage.ok ? "#10b981" : "#ef4444" }]}>
+                    {testMessage.text}
+                  </Text>
+                </View>
+              )}
+
+              <View style={styles.modalFooter}>
+                <TouchableOpacity style={styles.btnTest} onPress={handleTestPing} disabled={isTesting}>
+                  {isTesting ? (
+                    <ActivityIndicator size="small" color="#38bdf8" />
+                  ) : (
+                    <Text style={styles.btnTestText}>Test Ping</Text>
+                  )}
+                </TouchableOpacity>
+
+                <TouchableOpacity style={styles.btnSave} onPress={handleSaveUrl}>
+                  <Text style={styles.btnSaveText}>Save & Connect</Text>
+                </TouchableOpacity>
+              </View>
             </View>
           </View>
-        </View>
-      </Modal>
-    </SafeAreaView>
+        </Modal>
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
 
