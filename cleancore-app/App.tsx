@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   View,
   Text,
@@ -9,16 +9,17 @@ import {
   ActivityIndicator,
   Platform,
   Alert,
-  StatusBar as RNStatusBar,
+  BackHandler,
+  Linking,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
-import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as FileSystem from "expo-file-system";
 import * as Sharing from "expo-sharing";
 import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 
-// Conditionally import WebView on native platforms
+// ── Conditionally import WebView (only on native) ──────────────────────────
 let WebView: any = null;
 if (Platform.OS !== "web") {
   try {
@@ -28,23 +29,38 @@ if (Platform.OS !== "web") {
   }
 }
 
+// ── Constants ──────────────────────────────────────────────────────────────
 const STORAGE_KEY = "cleancore_server_url";
 
-const getDefaultUrl = () => {
+/**
+ * Default production server (Render free tier).
+ * Used on first launch when AsyncStorage has no saved URL.
+ * Do NOT add a trailing slash.
+ */
+const DEFAULT_SERVER_URL = "https://cleancore.onrender.com";
+
+/**
+ * Render free-tier servers sleep after inactivity and can take up to 60 s
+ * to wake. All ping / fetch operations use this timeout.
+ */
+const PING_TIMEOUT_MS = 60_000;
+
+/** Returns the URL to load on first launch (no saved value). */
+const getDefaultUrl = (): string => {
   if (Platform.OS === "web") {
-    if (typeof window !== "undefined" && window.location?.hostname) {
-      return `http://${window.location.hostname}:5000`;
+    // If Expo Web is served from localhost alongside a local Flask server, use that.
+    if (typeof window !== "undefined") {
+      const h = window.location?.hostname ?? "";
+      if (h === "localhost" || h === "127.0.0.1") {
+        return "http://127.0.0.1:5000";
+      }
     }
-    return "http://127.0.0.1:5000";
-  } else if (Platform.OS === "android") {
-    // 10.0.2.2 = Android emulator alias. Physical phones need laptop's LAN IP (192.168.x.x).
-    // We deliberately return empty string here so first-time users are shown the
-    // "no server configured" screen and prompted to set their own IP.
-    return "";
   }
-  return "http://127.0.0.1:5000";
+  // Android (emulator, physical device) and all other platforms → hosted server
+  return DEFAULT_SERVER_URL;
 };
 
+// ── App ────────────────────────────────────────────────────────────────────
 export default function App() {
   const [serverUrl, setServerUrl] = useState<string>(getDefaultUrl());
   const [inputUrl, setInputUrl] = useState<string>("");
@@ -54,43 +70,46 @@ export default function App() {
   const [isTesting, setIsTesting] = useState<boolean>(false);
   const [testMessage, setTestMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const [downloadingFile, setDownloadingFile] = useState<string | null>(null);
-  // Tracks whether the WebView itself (after successfully reaching server) is still loading
+  /** True while the WebView page is still fetching/painting after a successful ping. */
   const [webViewLoading, setWebViewLoading] = useState<boolean>(true);
-  // True when the WebView fires onError / onHttpError (network-level failure)
+  /** Non-null when the WebView fires onError / onHttpError. */
   const [webViewError, setWebViewError] = useState<string | null>(null);
 
   const webViewRef = useRef<any>(null);
 
-  // Initialize saved server URL
+  // ── 1. Initialise server URL from AsyncStorage ─────────────────────────
   useEffect(() => {
     AsyncStorage.getItem(STORAGE_KEY).then((saved) => {
-      if (saved && saved.startsWith("http")) {
-        const clean = saved.trim().replace(/\/+$/, "");
-        setServerUrl(clean);
-        checkServer(clean);
-      } else {
-        const def = getDefaultUrl();
-        if (def) {
-          setServerUrl(def);
-          checkServer(def);
-        } else {
-          // No default URL (physical Android device, never configured)
-          setServerUrl("");
-          setIsChecking(false);
-          setIsOnline(false);
-          // Open the config modal immediately so user can set their server IP
-          setIsConfigOpen(true);
-        }
-      }
+      const url = saved && saved.startsWith("http")
+        ? saved.trim().replace(/\/+$/, "")
+        : getDefaultUrl();
+      setServerUrl(url);
+      checkServer(url);
+      // No modal on first launch — the default URL is a valid hosted server.
     });
   }, []);
 
+  // ── 2. Android hardware back button — go back in WebView history ───────
+  useEffect(() => {
+    if (Platform.OS !== "android") return;
+    const onBack = () => {
+      if (webViewRef.current) {
+        webViewRef.current.goBack();
+        return true; // consumed — do not exit app
+      }
+      return false; // let the OS handle it (exit app)
+    };
+    const sub = BackHandler.addEventListener("hardwareBackPress", onBack);
+    return () => sub.remove();
+  }, []);
+
+  // ── Server connectivity check (60 s timeout) ───────────────────────────
   const checkServer = async (urlToCheck: string) => {
     setIsChecking(true);
     try {
       const clean = urlToCheck.trim().replace(/\/+$/, "");
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 4000);
+      const timer = setTimeout(() => controller.abort(), PING_TIMEOUT_MS);
       const res = await fetch(`${clean}/`, { signal: controller.signal, cache: "no-store" });
       clearTimeout(timer);
       setIsOnline(res.ok);
@@ -101,17 +120,18 @@ export default function App() {
     }
   };
 
+  // ── Test Ping (modal) — 60 s timeout ──────────────────────────────────
   const handleTestPing = async () => {
     setIsTesting(true);
     setTestMessage(null);
     try {
       const clean = inputUrl.trim().replace(/\/+$/, "");
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 5000);
+      const timer = setTimeout(() => controller.abort(), PING_TIMEOUT_MS);
       const res = await fetch(`${clean}/`, { signal: controller.signal, cache: "no-store" });
       clearTimeout(timer);
       if (res.ok) {
-        setTestMessage({ ok: true, text: "Successfully connected to CleanCore Flask server!" });
+        setTestMessage({ ok: true, text: "Connected to CleanCore server successfully!" });
       } else {
         setTestMessage({ ok: false, text: `Server returned HTTP ${res.status}` });
       }
@@ -122,6 +142,7 @@ export default function App() {
     }
   };
 
+  // ── Save URL from config modal ─────────────────────────────────────────
   const handleSaveUrl = async () => {
     const clean = inputUrl.trim().replace(/\/+$/, "");
     setServerUrl(clean);
@@ -141,8 +162,9 @@ export default function App() {
     setIsConfigOpen(true);
   };
 
-  // ===== NATIVE DOWNLOAD BRIDGE FOR ANDROID =====
-  // Intercepts download routes: /api/download/dataset, /api/download/missing-log, /api/report/pdf, /api/report/html
+  // ── Native download bridge ─────────────────────────────────────────────
+  // Primary path: expo-file-system download → expo-sharing share dialog
+  // Fallback:     Linking.openURL → system browser (handles redirect, auth, etc.)
   const handleDownload = async (url: string) => {
     try {
       let filename = "cleancore_export";
@@ -160,15 +182,20 @@ export default function App() {
       } else if (url.includes("/api/report/html")) {
         filename = "cleancore_quality_report.html";
         mimeType = "text/html";
+      } else if (url.includes(".xlsx") || url.includes("excel")) {
+        filename = "cleancore_dataset.xlsx";
+        mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
       }
 
       setDownloadingFile(filename);
 
-      const cacheDir = (FileSystem as any).cacheDirectory || (FileSystem as any).documentDirectory || "";
+      const cacheDir =
+        (FileSystem as any).cacheDirectory ||
+        (FileSystem as any).documentDirectory ||
+        "";
       const targetUri = `${cacheDir}${filename}`;
 
       const downloadResult = await (FileSystem as any).downloadAsync(url, targetUri);
-
       setDownloadingFile(null);
 
       if (await Sharing.isAvailableAsync()) {
@@ -179,13 +206,24 @@ export default function App() {
       } else {
         Alert.alert("File Downloaded", `Saved to: ${downloadResult.uri}`);
       }
-    } catch (err: any) {
+    } catch (fsErr: any) {
       setDownloadingFile(null);
-      Alert.alert("Download Error", err.message || "Failed to download file.");
+      // Fallback: open in system browser so the browser handles the download
+      try {
+        const canOpen = await Linking.canOpenURL(url);
+        if (canOpen) {
+          await Linking.openURL(url);
+        } else {
+          Alert.alert("Download Error", fsErr.message || "Failed to download file.");
+        }
+      } catch {
+        Alert.alert("Download Error", fsErr.message || "Failed to download file.");
+      }
     }
   };
 
-  // Appends ?app=mobile to the server URL so the web frontend can detect the mobile app
+  // ── Helpers for mobileUrl ──────────────────────────────────────────────
+  /** Appends ?app=mobile so the web frontend adds html.mobile-app and shows the hamburger. */
   const mobileUrl = (base: string): string => {
     if (!base) return base;
     try {
@@ -193,14 +231,13 @@ export default function App() {
       u.searchParams.set("app", "mobile");
       return u.toString();
     } catch {
-      // Fallback for environments where URL constructor isn't available
       const sep = base.includes("?") ? "&" : "?";
       return `${base}${sep}app=mobile`;
     }
   };
 
-  // Script injected BEFORE page content loads — sets window flag so the web page
-  // knows it is inside CleanCore Mobile (faster than waiting for DOMContentLoaded)
+  // ── Scripts injected into the WebView ─────────────────────────────────
+  /** Runs BEFORE any page script — sets the window flag immediately. */
   const injectedJsBeforeContent = `
     (function() {
       try { window.__CLEANCORE_MOBILE_APP__ = true; } catch(e) {}
@@ -208,11 +245,11 @@ export default function App() {
     true;
   `;
 
-  // Injected JavaScript inside the original web app to bridge downloads and window.open calls to native
+  /** Runs after page load — bridges downloads and window.open calls. */
   const injectedJs = `
     (function() {
-      // Intercept window.open
-      const originalOpen = window.open;
+      // Intercept window.open for download/report URLs → send to native handler
+      var originalOpen = window.open;
       window.open = function(url) {
         if (url && (url.includes('/api/download/') || url.includes('/api/report/'))) {
           window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'DOWNLOAD', url: url }));
@@ -221,9 +258,9 @@ export default function App() {
         return originalOpen.apply(this, arguments);
       };
 
-      // Intercept dynamic link clicks for downloads
+      // Intercept <a> clicks for download/report URLs → send to native handler
       document.addEventListener('click', function(e) {
-        const link = e.target.closest('a');
+        var link = e.target.closest('a');
         if (link && link.href) {
           if (link.href.includes('/api/download/') || link.href.includes('/api/report/')) {
             e.preventDefault();
@@ -235,44 +272,41 @@ export default function App() {
     true;
   `;
 
-  // ── Body renderer ──────────────────────────────────────────────
-  // State machine for the body area so it is NEVER blank:
-  //   isChecking          → fullscreen loading spinner (pinging server)
-  //   !serverUrl          → "no server configured" prompt
-  //   !isOnline           → "server unreachable" error + settings shortcut
-  //   webViewError        → WebView reported a network-level failure
-  //   otherwise           → WebView (with per-page loading overlay)
-
+  // ── Body state-machine ─────────────────────────────────────────────────
+  // Never blank: always shows one of loading / no-server / error / webview.
   const renderBody = () => {
-    // 1. Still doing the initial ping
+    // 1. Pinging server (can take up to 60 s for a sleeping Render server)
     if (isChecking) {
       return (
         <View style={styles.centerBox}>
           <ActivityIndicator size="large" color="#38bdf8" />
-          <Text style={styles.centerTitle}>Connecting to CleanCore…</Text>
-          <Text style={styles.centerSub}>{serverUrl || "Checking server…"}</Text>
+          <Text style={styles.centerTitle}>Connecting to server...</Text>
+          <Text style={styles.centerSub}>{serverUrl}</Text>
+          <Text style={styles.centerHint}>
+            Free servers wake up in ~30–60 s after inactivity. Please wait.
+          </Text>
         </View>
       );
     }
 
-    // 2. No URL configured at all (first launch on physical device)
+    // 2. No URL at all
     if (!serverUrl) {
       return (
         <View style={styles.centerBox}>
           <MaterialCommunityIcons name="server-network-off" size={52} color="#38bdf8" />
           <Text style={styles.centerTitle}>No Server Configured</Text>
           <Text style={styles.centerSub}>
-            Enter your laptop's local IP address so CleanCore Mobile can reach the Flask backend.
+            Tap the gear icon to set the CleanCore server URL.
           </Text>
           <TouchableOpacity style={[styles.btnPrimary, { marginTop: 8 }]} onPress={openConfig}>
             <Feather name="settings" size={14} color="#fff" />
-            <Text style={styles.btnPrimaryText}>Set Server IP</Text>
+            <Text style={styles.btnPrimaryText}>Configure Server</Text>
           </TouchableOpacity>
         </View>
       );
     }
 
-    // 3. Server ping failed
+    // 3. Ping failed → cannot reach server
     if (!isOnline) {
       return (
         <View style={styles.centerBox}>
@@ -283,11 +317,10 @@ export default function App() {
             <Text style={{ fontWeight: "700", color: "#38bdf8" }}>{serverUrl}</Text>
           </Text>
           <View style={styles.troubleshootBox}>
-            <Text style={styles.troubleshootHeader}>Checklist:</Text>
-            <Text style={styles.troubleshootItem}>① Run  python run.py  on your laptop</Text>
-            <Text style={styles.troubleshootItem}>② Phone &amp; laptop must share the same Wi-Fi</Text>
-            <Text style={styles.troubleshootItem}>③ Use your laptop's LAN IP, e.g. 192.168.1.X</Text>
-            <Text style={styles.troubleshootItem}>④ Tap "Server Settings" to update the URL</Text>
+            <Text style={styles.troubleshootHeader}>Possible causes:</Text>
+            <Text style={styles.troubleshootItem}>① Server is still waking up — tap Retry</Text>
+            <Text style={styles.troubleshootItem}>② No internet connection on this device</Text>
+            <Text style={styles.troubleshootItem}>③ Wrong server URL — tap Server Settings</Text>
           </View>
           <View style={styles.errorBtnRow}>
             <TouchableOpacity style={styles.btnSecondary} onPress={openConfig}>
@@ -309,7 +342,7 @@ export default function App() {
       );
     }
 
-    // 4. WebView reported a network error after the initial ping passed
+    // 4. WebView reported a network-level error after the ping succeeded
     if (webViewError) {
       return (
         <View style={styles.centerBox}>
@@ -337,59 +370,68 @@ export default function App() {
       );
     }
 
-    // 5. Server reachable — show WebView (with loading overlay until page paints)
+    // 5. Expo Web — use an iframe (no native WebView available)
     if (Platform.OS === "web") {
       return (
         <iframe
-          src={serverUrl}
+          src={mobileUrl(serverUrl)}
           style={{ width: "100%", height: "100%", border: "none" } as any}
-          title="CleanCore Original Application"
+          title="CleanCore"
         />
       );
     }
 
+    // 6. react-native-webview unavailable (e.g. web-only build)
     if (!WebView) {
       return (
         <View style={styles.centerBox}>
           <MaterialCommunityIcons name="alert-circle-outline" size={48} color="#ef4444" />
           <Text style={styles.centerTitle}>WebView unavailable</Text>
           <Text style={styles.centerSub}>
-            react-native-webview could not be loaded on this platform.{"\n"}
-            Try opening the app with a development build instead of Expo Go.
+            react-native-webview could not be loaded.{"\n"}
+            Use a development build instead of Expo Go.
           </Text>
         </View>
       );
     }
 
+    // 7. All good — render the WebView
     return (
       <>
         <WebView
           ref={webViewRef}
+          // ?app=mobile triggers html.mobile-app class → hamburger appears
           source={{ uri: mobileUrl(serverUrl) }}
           style={styles.webview}
           javaScriptEnabled={true}
           domStorageEnabled={true}
+          // File upload support
           allowFileAccess={true}
           allowFileAccessFromFileURLs={true}
-          originWhitelist={["*"]}
+          allowUniversalAccessFromFileURLs={true}
+          // Mixed content (HTTPS page loading HTTP sub-resources) allowed
           mixedContentMode="always"
-          // Append " CleanCoreMobile" to the user-agent so the web page can detect us
+          originWhitelist={["*"]}
+          // Mobile-app detection signals
           applicationNameForUserAgent="CleanCoreMobile"
-          // Set window.__CLEANCORE_MOBILE_APP__ = true before any page script runs
           injectedJavaScriptBeforeContentLoaded={injectedJsBeforeContent}
           injectedJavaScript={injectedJs}
+          // Loading lifecycle
           onLoadStart={() => setWebViewLoading(true)}
           onLoadEnd={() => setWebViewLoading(false)}
+          // Network-level errors
           onError={(e: any) => {
             const desc = e?.nativeEvent?.description || "Unknown error";
             setWebViewLoading(false);
-            setWebViewError(`WebView error: ${desc}`);
+            setWebViewError(`Connection error: ${desc}`);
           }}
           onHttpError={(e: any) => {
             const code = e?.nativeEvent?.statusCode ?? "?";
             setWebViewLoading(false);
-            setWebViewError(`HTTP ${code} from server`);
+            // 404/500 from the server are shown in the WebView itself, not an error screen
+            if (code >= 500) setWebViewError(`Server error: HTTP ${code}`);
           }}
+          // Messages from injectedJs (download interception)
           onMessage={(event: any) => {
             try {
               const data = JSON.parse(event.nativeEvent.data);
@@ -403,12 +445,12 @@ export default function App() {
               console.error("WebView message error:", e);
             }
           }}
+          // Render-level WebView crash (distinct from network errors)
           renderError={(errorName: any) => (
-            // renderError fires for WebView render-level crashes (not network errors)
             <View style={styles.centerBox}>
               <MaterialCommunityIcons name="server-network-off" size={48} color="#ef4444" />
-              <Text style={styles.centerTitle}>Render Error: {errorName}</Text>
-              <Text style={styles.centerSub}>The WebView could not display this page.</Text>
+              <Text style={styles.centerTitle}>Render Error</Text>
+              <Text style={styles.centerSub}>{errorName}</Text>
               <TouchableOpacity
                 style={[styles.btnPrimary, { marginTop: 8 }]}
                 onPress={() => {
@@ -422,7 +464,7 @@ export default function App() {
           )}
         />
 
-        {/* Page loading overlay — shown while WebView is fetching/painting */}
+        {/* Dark overlay while page is painting (hidden after onLoadEnd) */}
         {webViewLoading && (
           <View style={styles.loadingOverlay}>
             <ActivityIndicator size="large" color="#38bdf8" />
@@ -433,12 +475,13 @@ export default function App() {
     );
   };
 
+  // ── Render ─────────────────────────────────────────────────────────────
   return (
     <SafeAreaProvider>
       <SafeAreaView style={styles.container} edges={["top", "left", "right"]}>
         <StatusBar style="light" />
 
-        {/* ── Top bar: brand + server pill ── */}
+        {/* ── Top bar ── */}
         <View style={styles.statusBar}>
           <View style={styles.brandRow}>
             <View style={styles.brandBadge}>
@@ -464,23 +507,28 @@ export default function App() {
         <View style={styles.content}>
           {renderBody()}
 
-          {/* Download overlay */}
+          {/* Download progress overlay */}
           {downloadingFile && (
             <View style={styles.downloadOverlay}>
               <ActivityIndicator size="large" color="#38bdf8" />
-              <Text style={styles.downloadText}>Downloading & Preparing {downloadingFile}…</Text>
+              <Text style={styles.downloadText}>Downloading {downloadingFile}…</Text>
             </View>
           )}
         </View>
 
         {/* ── Server Configuration Modal ── */}
-        <Modal visible={isConfigOpen} transparent animationType="fade" onRequestClose={() => setIsConfigOpen(false)}>
+        <Modal
+          visible={isConfigOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setIsConfigOpen(false)}
+        >
           <View style={styles.modalBackdrop}>
             <View style={styles.modalCard}>
               <View style={styles.modalHeader}>
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
                   <MaterialCommunityIcons name="server-network" size={20} color="#38bdf8" />
-                  <Text style={styles.modalTitle}>CleanCore Server Configuration</Text>
+                  <Text style={styles.modalTitle}>Server Configuration</Text>
                 </View>
                 <TouchableOpacity onPress={() => setIsConfigOpen(false)}>
                   <Feather name="x" size={20} color="#94a3b8" />
@@ -488,22 +536,28 @@ export default function App() {
               </View>
 
               <Text style={styles.modalDesc}>
-                CleanCore's Python Flask backend runs on your laptop (port 5000).{"\n"}
-                Enter your laptop's local IP address below.
+                The CleanCore backend runs at the URL below. Change it only if you
+                are running a local Flask server on the same Wi-Fi network.
               </Text>
 
               <View style={styles.quickOptions}>
                 <TouchableOpacity
                   style={styles.quickBtn}
+                  onPress={() => setInputUrl(DEFAULT_SERVER_URL)}
+                >
+                  <Text style={styles.quickBtnText}>Render (default)</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.quickBtn}
                   onPress={() => setInputUrl("http://10.0.2.2:5000")}
                 >
-                  <Text style={styles.quickBtnText}>Emulator (10.0.2.2)</Text>
+                  <Text style={styles.quickBtnText}>Emulator local</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.quickBtn}
                   onPress={() => setInputUrl("http://localhost:5000")}
                 >
-                  <Text style={styles.quickBtnText}>Localhost (Web)</Text>
+                  <Text style={styles.quickBtnText}>Localhost</Text>
                 </TouchableOpacity>
               </View>
 
@@ -511,7 +565,7 @@ export default function App() {
                 style={styles.modalInput}
                 value={inputUrl}
                 onChangeText={setInputUrl}
-                placeholder="http://192.168.1.X:5000"
+                placeholder="https://cleancore.onrender.com"
                 placeholderTextColor="#64748b"
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -522,7 +576,11 @@ export default function App() {
                 <View
                   style={[
                     styles.testMsgBox,
-                    { backgroundColor: testMessage.ok ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)" },
+                    {
+                      backgroundColor: testMessage.ok
+                        ? "rgba(16,185,129,0.15)"
+                        : "rgba(239,68,68,0.15)",
+                    },
                   ]}
                 >
                   <Feather
@@ -530,14 +588,29 @@ export default function App() {
                     size={15}
                     color={testMessage.ok ? "#10b981" : "#ef4444"}
                   />
-                  <Text style={[styles.testMsgText, { color: testMessage.ok ? "#10b981" : "#ef4444" }]}>
+                  <Text
+                    style={[
+                      styles.testMsgText,
+                      { color: testMessage.ok ? "#10b981" : "#ef4444" },
+                    ]}
+                  >
                     {testMessage.text}
                   </Text>
                 </View>
               )}
 
+              {isTesting && (
+                <Text style={[styles.centerHint, { textAlign: "left" }]}>
+                  Waiting up to 60 s for server to wake…
+                </Text>
+              )}
+
               <View style={styles.modalFooter}>
-                <TouchableOpacity style={styles.btnTest} onPress={handleTestPing} disabled={isTesting}>
+                <TouchableOpacity
+                  style={styles.btnTest}
+                  onPress={handleTestPing}
+                  disabled={isTesting}
+                >
                   {isTesting ? (
                     <ActivityIndicator size="small" color="#38bdf8" />
                   ) : (
@@ -557,6 +630,7 @@ export default function App() {
   );
 }
 
+// ── Styles ─────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -611,6 +685,7 @@ const styles = StyleSheet.create({
     color: "#cbd5e1",
     fontSize: 11,
     fontWeight: "500",
+    flexShrink: 1,
   },
   content: {
     flex: 1,
@@ -620,7 +695,7 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#0f172a",
   },
-  // ── Centred full-screen states (loading / no-server / error) ──
+  // ── Centred states ──
   centerBox: {
     flex: 1,
     backgroundColor: "#0f172a",
@@ -641,7 +716,14 @@ const styles = StyleSheet.create({
     textAlign: "center",
     lineHeight: 19,
   },
-  // Loading overlay that sits on top of the WebView while page paints
+  centerHint: {
+    color: "#64748b",
+    fontSize: 11,
+    textAlign: "center",
+    lineHeight: 16,
+    maxWidth: 280,
+  },
+  // ── Loading overlay (on top of WebView while page paints) ──
   loadingOverlay: {
     position: "absolute",
     top: 0,
@@ -654,27 +736,6 @@ const styles = StyleSheet.create({
     gap: 14,
     zIndex: 10,
   },
-  // Keep the old names so nothing else breaks
-  errorContainer: {
-    flex: 1,
-    backgroundColor: "#0f172a",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 24,
-    gap: 12,
-  },
-  errorTitle: {
-    color: "#f8fafc",
-    fontSize: 18,
-    fontWeight: "700",
-    textAlign: "center",
-  },
-  errorSub: {
-    color: "#94a3b8",
-    fontSize: 13,
-    textAlign: "center",
-    lineHeight: 18,
-  },
   troubleshootBox: {
     backgroundColor: "#1e293b",
     borderColor: "#334155",
@@ -684,7 +745,7 @@ const styles = StyleSheet.create({
     width: "100%",
     maxWidth: 380,
     gap: 6,
-    marginVertical: 12,
+    marginVertical: 8,
   },
   troubleshootHeader: {
     color: "#cbd5e1",
@@ -700,6 +761,8 @@ const styles = StyleSheet.create({
   errorBtnRow: {
     flexDirection: "row",
     gap: 12,
+    flexWrap: "wrap",
+    justifyContent: "center",
   },
   btnSecondary: {
     flexDirection: "row",
@@ -780,7 +843,7 @@ const styles = StyleSheet.create({
   },
   quickOptions: {
     flexDirection: "row",
-    gap: 8,
+    gap: 6,
     flexWrap: "wrap",
   },
   quickBtn: {
@@ -821,7 +884,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "flex-end",
     gap: 10,
-    marginTop: 6,
+    marginTop: 4,
   },
   btnTest: {
     borderColor: "#38bdf8",

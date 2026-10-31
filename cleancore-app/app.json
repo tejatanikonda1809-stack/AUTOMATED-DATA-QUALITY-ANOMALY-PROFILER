@@ -7,6 +7,7 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
     "splash": {
+      "image": "./assets/splash-icon.png",
       "backgroundColor": "#0f172a",
       "resizeMode": "contain"
     },
@@ -14,7 +15,7 @@
       "supportsTablet": true
     },
     "android": {
-      "package": "com.cleancore.profiler",
+      "package": "com.cleancore.mobile",
       "adaptiveIcon": {
         "backgroundColor": "#0f172a",
         "foregroundImage": "./assets/android-icon-foreground.png",
