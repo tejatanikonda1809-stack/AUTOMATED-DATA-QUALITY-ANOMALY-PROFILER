@@ -37,6 +37,12 @@
     },
     "plugins": [
       "expo-sharing"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "4af3eb0c-abba-42dd-8511-f16656b78c91"
+      }
+    },
+    "owner": "tharun004"
   }
 }

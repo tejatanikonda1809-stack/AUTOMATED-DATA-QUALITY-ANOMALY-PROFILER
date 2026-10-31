@@ -481,25 +481,38 @@ export default function App() {
       <SafeAreaView style={styles.container} edges={["top", "left", "right"]}>
         <StatusBar style="light" />
 
-        {/* ── Top bar ── */}
+        {/* ── Top bar: logo + title (left) · gear + status dot (right) ── */}
         <View style={styles.statusBar}>
+          {/* Left: logo badge + "CleanCore" wordmark */}
           <View style={styles.brandRow}>
             <View style={styles.brandBadge}>
               <MaterialCommunityIcons name="layers-triple-outline" size={16} color="#38bdf8" />
             </View>
-            <Text style={styles.brandText}>CleanCore Mobile</Text>
+            <Text style={styles.brandText}>CleanCore</Text>
           </View>
 
-          <TouchableOpacity style={styles.serverPill} onPress={openConfig} activeOpacity={0.8}>
-            {isChecking ? (
-              <ActivityIndicator size="small" color="#38bdf8" style={{ marginRight: 4 }} />
-            ) : (
-              <View style={[styles.dot, { backgroundColor: isOnline ? "#10b981" : "#ef4444" }]} />
-            )}
-            <Text style={styles.serverUrlText} numberOfLines={1}>
-              {serverUrl ? serverUrl.replace(/^https?:\/\//, "") : "Not configured"}
-            </Text>
-            <Feather name="settings" size={13} color="#94a3b8" />
+          {/* Right: gear button with small status dot overlay */}
+          <TouchableOpacity
+            style={styles.gearBtn}
+            onPress={openConfig}
+            activeOpacity={0.75}
+            accessibilityLabel="Server settings"
+            accessibilityRole="button"
+          >
+            <Feather name="settings" size={20} color="#94a3b8" />
+            {/* Status dot overlaid on the gear — grey while checking */}
+            <View
+              style={[
+                styles.gearDot,
+                {
+                  backgroundColor: isChecking
+                    ? "#64748b"
+                    : isOnline
+                    ? "#10b981"
+                    : "#ef4444",
+                },
+              ]}
+            />
           </TouchableOpacity>
         </View>
 
@@ -665,6 +678,7 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   serverPill: {
+    // kept so nothing crashes if referenced elsewhere, but no longer rendered
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
@@ -686,6 +700,25 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "500",
     flexShrink: 1,
+  },
+  // ── Gear button (replaces old server pill) ──
+  gearBtn: {
+    width: 44,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 10,
+    position: "relative",
+  },
+  gearDot: {
+    position: "absolute",
+    top: 8,
+    right: 8,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    borderWidth: 1.5,
+    borderColor: "#1e293b", // matches statusBar background so it looks inset
   },
   content: {
     flex: 1,
