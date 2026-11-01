@@ -15,7 +15,7 @@ import {
 import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import * as FileSystem from "expo-file-system";
+import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
 import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 
@@ -163,52 +163,90 @@ export default function App() {
   };
 
   // ── Native download bridge ─────────────────────────────────────────────
-  // Primary path: expo-file-system download → expo-sharing share dialog
-  // Fallback:     Linking.openURL → system browser (handles redirect, auth, etc.)
-  const handleDownload = async (url: string) => {
-    try {
-      let filename = "cleancore_export";
-      let mimeType = "application/octet-stream";
+  const getBaseDir = () => {
+    const dir = FileSystem.cacheDirectory || FileSystem.documentDirectory || "";
+    return dir.endsWith("/") ? dir : `${dir}/`;
+  };
 
-      if (url.includes("/api/download/dataset")) {
-        filename = "cleancore_cleaned_dataset.csv";
-        mimeType = "text/csv";
-      } else if (url.includes("/api/download/missing-log")) {
-        filename = "cleancore_missing_log.csv";
-        mimeType = "text/csv";
-      } else if (url.includes("/api/report/pdf")) {
-        filename = "cleancore_quality_report.pdf";
-        mimeType = "application/pdf";
-      } else if (url.includes("/api/report/html")) {
-        filename = "cleancore_quality_report.html";
-        mimeType = "text/html";
-      } else if (url.includes(".xlsx") || url.includes("excel")) {
-        filename = "cleancore_dataset.xlsx";
-        mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  const handleSaveBase64 = async (
+    base64Data: string,
+    filename: string,
+    mimeType?: string
+  ) => {
+    try {
+      const cleanName = filename.replace(/[^a-zA-Z0-9._-]/g, "_") || "cleancore_export";
+      setDownloadingFile(cleanName);
+
+      let cleanMime = mimeType || "application/octet-stream";
+      if (!mimeType || mimeType === "application/octet-stream") {
+        if (cleanName.endsWith(".pdf")) cleanMime = "application/pdf";
+        else if (cleanName.endsWith(".html") || cleanName.endsWith(".htm")) cleanMime = "text/html";
+        else if (cleanName.endsWith(".csv")) cleanMime = "text/csv";
+        else if (cleanName.endsWith(".xlsx"))
+          cleanMime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
       }
 
-      setDownloadingFile(filename);
+      const baseDir = getBaseDir();
+      const targetUri = `${baseDir}${cleanName}`;
 
-      const cacheDir =
-        (FileSystem as any).cacheDirectory ||
-        (FileSystem as any).documentDirectory ||
-        "";
-      const targetUri = `${cacheDir}${filename}`;
+      await FileSystem.writeAsStringAsync(targetUri, base64Data, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
 
-      const downloadResult = await (FileSystem as any).downloadAsync(url, targetUri);
+      setDownloadingFile(null);
+
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(targetUri, {
+          mimeType: cleanMime,
+          dialogTitle: `Save / Share ${cleanName}`,
+        });
+      } else {
+        Alert.alert("File Downloaded", `Saved to: ${targetUri}`);
+      }
+    } catch (err: any) {
+      setDownloadingFile(null);
+      Alert.alert("Download Error", err?.message || "Failed to save file.");
+    }
+  };
+
+  const handleDownloadUrl = async (url: string, preferredFilename?: string) => {
+    try {
+      let filename = preferredFilename || "cleancore_export";
+      let mimeType = "application/octet-stream";
+
+      if (url.includes("/api/download/dataset") || url.endsWith(".csv")) {
+        filename = preferredFilename || "cleancore_cleaned_dataset.csv";
+        mimeType = "text/csv";
+      } else if (url.includes("/api/download/missing-log") || url.endsWith(".xlsx")) {
+        filename = preferredFilename || "cleancore_missing_values_log.xlsx";
+        mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+      } else if (url.includes("/api/report/pdf") || url.endsWith(".pdf")) {
+        filename = preferredFilename || "cleancore_quality_report.pdf";
+        mimeType = "application/pdf";
+      } else if (url.includes("/api/report/html") || url.endsWith(".html")) {
+        filename = preferredFilename || "cleancore_quality_report.html";
+        mimeType = "text/html";
+      }
+
+      const cleanName = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+      setDownloadingFile(cleanName);
+
+      const baseDir = getBaseDir();
+      const targetUri = `${baseDir}${cleanName}`;
+
+      const downloadResult = await FileSystem.downloadAsync(url, targetUri);
       setDownloadingFile(null);
 
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(downloadResult.uri, {
           mimeType,
-          dialogTitle: `Save / Share ${filename}`,
+          dialogTitle: `Save / Share ${cleanName}`,
         });
       } else {
         Alert.alert("File Downloaded", `Saved to: ${downloadResult.uri}`);
       }
     } catch (fsErr: any) {
       setDownloadingFile(null);
-      // Fallback: open in system browser so the browser handles the download
       try {
         const canOpen = await Linking.canOpenURL(url);
         if (canOpen) {
@@ -237,37 +275,220 @@ export default function App() {
   };
 
   // ── Scripts injected into the WebView ─────────────────────────────────
-  /** Runs BEFORE any page script — sets the window flag immediately. */
+  /** Runs BEFORE any page script — sets the window flag immediately and hooks URL object methods early. */
   const injectedJsBeforeContent = `
     (function() {
       try { window.__CLEANCORE_MOBILE_APP__ = true; } catch(e) {}
+
+      try {
+        if (!window.__blobMap) {
+          window.__blobMap = new Map();
+        }
+
+        // Hook URL.createObjectURL to retain blobs in memory for native bridge
+        var origCreateObjectURL = URL.createObjectURL;
+        if (origCreateObjectURL && !URL.__hooked) {
+          URL.createObjectURL = function(blob) {
+            var url = origCreateObjectURL.apply(this, arguments);
+            try {
+              if (url && blob) {
+                window.__blobMap.set(url, blob);
+              }
+            } catch(e) {}
+            return url;
+          };
+          URL.__hooked = true;
+        }
+
+        // Delay URL.revokeObjectURL to give the native bridge ample time to read the blob
+        var origRevoke = URL.revokeObjectURL;
+        if (origRevoke && !URL.__revokeHooked) {
+          URL.revokeObjectURL = function(url) {
+            setTimeout(function() {
+              try {
+                if (window.__blobMap) window.__blobMap.delete(url);
+                origRevoke.call(URL, url);
+              } catch(e) {}
+            }, 30000);
+          };
+          URL.__revokeHooked = true;
+        }
+      } catch(e) {}
     })();
     true;
   `;
 
-  /** Runs after page load — bridges downloads and window.open calls. */
+  /** Runs after page load — bridges downloads, anchor clicks, and window.open calls. */
   const injectedJs = `
     (function() {
-      // Intercept window.open for download/report URLs → send to native handler
-      var originalOpen = window.open;
-      window.open = function(url) {
-        if (url && (url.includes('/api/download/') || url.includes('/api/report/'))) {
-          window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'DOWNLOAD', url: url }));
-          return null;
+      if (window.__CLEANCORE_DOWNLOAD_BRIDGE__) return;
+      window.__CLEANCORE_DOWNLOAD_BRIDGE__ = true;
+
+      function postToNative(msg) {
+        if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+          window.ReactNativeWebView.postMessage(JSON.stringify(msg));
         }
-        return originalOpen.apply(this, arguments);
+      }
+
+      function sendBlobAsBase64(blob, filename, mimeType) {
+        try {
+          var reader = new FileReader();
+          reader.onloadend = function() {
+            try {
+              var result = reader.result || '';
+              var commaIdx = result.indexOf(',');
+              var base64 = commaIdx !== -1 ? result.substring(commaIdx + 1) : result;
+              var detectedMime = mimeType || blob.type || 'application/octet-stream';
+              if (!detectedMime || detectedMime === 'application/octet-stream') {
+                if (filename.endsWith('.pdf')) detectedMime = 'application/pdf';
+                else if (filename.endsWith('.html') || filename.endsWith('.htm')) detectedMime = 'text/html';
+                else if (filename.endsWith('.csv')) detectedMime = 'text/csv';
+                else if (filename.endsWith('.xlsx')) detectedMime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+              }
+              postToNative({
+                type: 'DOWNLOAD_BASE64',
+                base64: base64,
+                filename: filename,
+                mimeType: detectedMime
+              });
+            } catch (err) {
+              postToNative({
+                type: 'DOWNLOAD_ERROR',
+                error: 'Encoding error: ' + (err.message || String(err))
+              });
+            }
+          };
+          reader.onerror = function() {
+            postToNative({
+              type: 'DOWNLOAD_ERROR',
+              error: 'Failed to read file data.'
+            });
+          };
+          reader.readAsDataURL(blob);
+        } catch (e) {
+          postToNative({
+            type: 'DOWNLOAD_ERROR',
+            error: 'FileReader error: ' + (e.message || String(e))
+          });
+        }
+      }
+
+      function fetchInWebView(url, filename, mimeType) {
+        fetch(url, { credentials: 'include' })
+          .then(function(res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            var disp = res.headers.get('content-disposition') || '';
+            var match = disp.match(/filename\\*?=(?:UTF-8'')?["']?([^"';]+)["']?/i);
+            if (match && match[1]) {
+              filename = decodeURIComponent(match[1].trim());
+            }
+            var ctype = res.headers.get('content-type') || mimeType;
+            return res.blob().then(function(blob) {
+              return { blob: blob, ctype: ctype, filename: filename };
+            });
+          })
+          .then(function(data) {
+            sendBlobAsBase64(data.blob, data.filename, data.ctype);
+          })
+          .catch(function(err) {
+            // Fallback to sending direct DOWNLOAD message with url for native downloadAsync
+            postToNative({
+              type: 'DOWNLOAD',
+              url: url,
+              filename: filename
+            });
+          });
+      }
+
+      function handleDownloadTarget(href, downloadAttr) {
+        if (!href) return false;
+
+        var isDownload =
+          downloadAttr ||
+          href.startsWith('blob:') ||
+          href.includes('/api/download/') ||
+          href.includes('/api/report/') ||
+          href.endsWith('.pdf') ||
+          href.endsWith('.xlsx') ||
+          href.endsWith('.csv') ||
+          (href.endsWith('.html') && href.includes('/report'));
+
+        if (!isDownload) return false;
+
+        var filename = downloadAttr || '';
+        if (!filename) {
+          if (href.includes('.pdf') || href.includes('/pdf')) filename = 'data_quality_report.pdf';
+          else if (href.includes('.html') || href.includes('/html')) filename = 'data_quality_report.html';
+          else if (href.includes('missing-log') || href.endsWith('.xlsx')) filename = 'missing_values_log.xlsx';
+          else if (href.includes('dataset') || href.endsWith('.csv')) filename = 'cleaned_dataset.csv';
+          else filename = 'cleancore_export';
+        }
+
+        if (href.startsWith('blob:')) {
+          var blob = window.__blobMap ? window.__blobMap.get(href) : null;
+          if (blob) {
+            sendBlobAsBase64(blob, filename);
+            return true;
+          }
+          // Fetch the blob URL directly inside this context if not in map
+          fetch(href)
+            .then(function(r) { return r.blob(); })
+            .then(function(b) {
+              sendBlobAsBase64(b, filename);
+            })
+            .catch(function(err) {
+              postToNative({
+                type: 'DOWNLOAD_ERROR',
+                error: 'Could not access report blob: ' + (err.message || String(err))
+              });
+            });
+          return true;
+        }
+
+        var fullUrl = href;
+        if (!href.startsWith('http://') && !href.startsWith('https://')) {
+          var origin = window.location.origin || '';
+          fullUrl = origin + (href.startsWith('/') ? '' : '/') + href;
+        }
+
+        fetchInWebView(fullUrl, filename);
+        return true;
+      }
+
+      // Hook HTMLAnchorElement.prototype.click (called by api.js a.click())
+      var origClick = HTMLAnchorElement.prototype.click;
+      HTMLAnchorElement.prototype.click = function() {
+        var handled = false;
+        try {
+          var href = this.getAttribute('href') || this.href || '';
+          var dl = this.getAttribute('download') || this.download || '';
+          handled = handleDownloadTarget(href, dl);
+        } catch (e) {}
+        if (handled) return;
+        return origClick.apply(this, arguments);
       };
 
-      // Intercept <a> clicks for download/report URLs → send to native handler
+      // Intercept capturing clicks on <a> elements
       document.addEventListener('click', function(e) {
-        var link = e.target.closest('a');
-        if (link && link.href) {
-          if (link.href.includes('/api/download/') || link.href.includes('/api/report/')) {
+        var link = e.target && e.target.closest ? e.target.closest('a') : null;
+        if (link) {
+          var href = link.getAttribute('href') || link.href || '';
+          var dl = link.getAttribute('download') || link.download || '';
+          if (handleDownloadTarget(href, dl)) {
             e.preventDefault();
-            window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'DOWNLOAD', url: link.href }));
+            e.stopPropagation();
           }
         }
       }, true);
+
+      // Intercept window.open
+      var origOpen = window.open;
+      window.open = function(url) {
+        if (url && handleDownloadTarget(url, '')) {
+          return null;
+        }
+        return origOpen.apply(this, arguments);
+      };
     })();
     true;
   `;
@@ -431,15 +652,76 @@ export default function App() {
             // 404/500 from the server are shown in the WebView itself, not an error screen
             if (code >= 500) setWebViewError(`Server error: HTTP ${code}`);
           }}
-          // Messages from injectedJs (download interception)
+          // Intercept navigation requests to treat report/download URLs as downloads, never page navigations
+          onShouldStartLoadWithRequest={(request: any) => {
+            const url = request?.url || "";
+            if (!url) return true;
+
+            const isReportOrDownload =
+              url.startsWith("blob:") ||
+              url.includes("/api/download/") ||
+              url.includes("/api/report/") ||
+              url.endsWith(".pdf") ||
+              url.endsWith(".xlsx") ||
+              url.endsWith(".csv") ||
+              (url.endsWith(".html") && url.includes("/report"));
+
+            if (isReportOrDownload) {
+              if (url.startsWith("blob:")) {
+                webViewRef.current?.injectJavaScript(`
+                  (function() {
+                    try {
+                      fetch("${url}").then(function(r) { return r.blob(); }).then(function(b) {
+                        var reader = new FileReader();
+                        reader.onloadend = function() {
+                          var res = reader.result || '';
+                          var b64 = res.indexOf(',') !== -1 ? res.split(',')[1] : res;
+                          window.ReactNativeWebView.postMessage(JSON.stringify({
+                            type: 'DOWNLOAD_BASE64',
+                            base64: b64,
+                            filename: '${url.includes(".pdf") ? "data_quality_report.pdf" : "data_quality_report.html"}',
+                            mimeType: b.type || '${url.includes(".pdf") ? "application/pdf" : "text/html"}'
+                          }));
+                        };
+                        reader.readAsDataURL(b);
+                      });
+                    } catch(e) {}
+                  })();
+                  true;
+                `);
+              } else {
+                const fullUrl = url.startsWith("http")
+                  ? url
+                  : `${serverUrl}${url.startsWith("/") ? "" : "/"}${url}`;
+                handleDownloadUrl(fullUrl);
+              }
+              return false; // Stop page navigation inside WebView
+            }
+            return true;
+          }}
+          // Native Android file download hook
+          onFileDownload={({ nativeEvent: { downloadUrl } }: any) => {
+            if (downloadUrl) {
+              const fullUrl = downloadUrl.startsWith("http")
+                ? downloadUrl
+                : `${serverUrl}${downloadUrl.startsWith("/") ? "" : "/"}${downloadUrl}`;
+              handleDownloadUrl(fullUrl);
+            }
+          }}
+          // Messages from injectedJs (download interception & Base64 transfer)
           onMessage={(event: any) => {
             try {
               const data = JSON.parse(event.nativeEvent.data);
-              if (data.type === "DOWNLOAD" && data.url) {
+              if (data.type === "DOWNLOAD_BASE64" && data.base64) {
+                handleSaveBase64(data.base64, data.filename || "cleancore_export", data.mimeType);
+              } else if (data.type === "DOWNLOAD_ERROR") {
+                setDownloadingFile(null);
+                Alert.alert("Download Error", data.error || "An error occurred while downloading.");
+              } else if (data.type === "DOWNLOAD" && data.url) {
                 const fullUrl = data.url.startsWith("http")
                   ? data.url
                   : `${serverUrl}${data.url.startsWith("/") ? "" : "/"}${data.url}`;
-                handleDownload(fullUrl);
+                handleDownloadUrl(fullUrl, data.filename);
               }
             } catch (e) {
               console.error("WebView message error:", e);
