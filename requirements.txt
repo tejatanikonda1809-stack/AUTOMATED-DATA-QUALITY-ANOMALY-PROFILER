@@ -17,3 +17,5 @@ pytest>=7.4.0
 pytest-flask>=1.2.0
 chardet>=5.0.0
 gunicorn>=22.0.0
+xhtml2pdf>=0.2.11
+reportlab>=4.0.0

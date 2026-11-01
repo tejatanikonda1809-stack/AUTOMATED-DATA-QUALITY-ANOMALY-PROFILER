@@ -246,3 +246,40 @@ def test_no_dataframe_ambiguity_in_finalized_two_dataset_reports(client):
     assert "missing_values_log_cur.xlsx" in cur_log.headers.get("Content-Disposition", "")
 
 
+def test_reports_folder_created_at_startup(client):
+    """Item 57.1: Verify generated_reports folder is configured with absolute path and created at startup."""
+    import os
+    from backend.app import create_app
+    test_app = create_app()
+    reports_folder = test_app.config.get("REPORTS_FOLDER")
+    assert reports_folder is not None
+    assert os.path.isabs(reports_folder)
+    assert os.path.exists(reports_folder)
+    assert os.path.isdir(reports_folder)
+
+
+def test_report_without_dataset_returns_clear_message(client):
+    """Item 57.3: When no dataset is loaded, return 'No dataset loaded. Please upload a dataset again.'"""
+    res = client.post("/api/session/new")
+    sid = res.get_json()["session_id"]
+
+    # Request HTML report with no dataset uploaded
+    html_res = client.post("/api/report/html", json={"session_id": sid, "mode": "single"})
+    assert html_res.status_code == 400
+    assert html_res.get_json()["error"] == "No dataset loaded. Please upload a dataset again."
+
+    # Request PDF report with no dataset uploaded
+    pdf_res = client.post("/api/report/pdf", json={"session_id": sid, "mode": "single"})
+    assert pdf_res.status_code == 400
+    assert pdf_res.get_json()["error"] == "No dataset loaded. Please upload a dataset again."
+
+
+def test_weasyprint_fallback_and_html_safety():
+    """Item 57.4: Wrapping WeasyPrint import/call does not crash HTML or PDF generation."""
+    from backend.reports.pdf_renderer import render_pdf_report
+    html = "<html><body><h1>Test CleanCore Report</h1><p>Sample content</p></body></html>"
+    pdf = render_pdf_report(html)
+    assert pdf is not None
+    assert pdf.startswith(b"%PDF")
+
+

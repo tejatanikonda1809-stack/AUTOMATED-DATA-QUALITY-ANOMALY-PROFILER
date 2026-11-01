@@ -1,11 +1,16 @@
 """Report and download routes."""
 import io
-from flask import Blueprint, request, jsonify, send_file, Response
+import os
+import re
+import logging
+from flask import Blueprint, request, jsonify, send_file, Response, current_app
 from backend.services import session_manager as sm
 from backend.reports.report_builder import build_single_report, build_comparison_report, build_analysis_only_report
 from backend.reports.html_renderer import render_html_report
 from backend.reports.pdf_renderer import render_pdf_report
 from backend.analysis import run_full_analysis
+
+logger = logging.getLogger(__name__)
 
 bp = Blueprint("reports", __name__, url_prefix="/api")
 
@@ -16,17 +21,38 @@ def html_report():
     sid = data.get("session_id")
     mode = data.get("mode", "single")
     report_type = data.get("report_type", "analysis")  # analysis | comparison
-    if not sid: return jsonify({"error": "session_id required."}), 400
+    if not sid:
+        return jsonify({"error": "session_id required."}), 400
 
+    step = "loading dataset"
     try:
+        step = "loading dataset"
         report_data = _build_report_data(sid, mode, report_type)
+        step = "rendering the HTML template"
         html = render_html_report(report_data)
         filename = _report_filename(mode, report_type, "html")
-        return Response(html, mimetype="text/html",
-                        headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+        reports_dir = current_app.config.get(
+            "REPORTS_FOLDER",
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "generated_reports"))
+        )
+        os.makedirs(reports_dir, exist_ok=True)
+        safe_sid = re.sub(r"[^a-zA-Z0-9_-]", "_", str(sid))
+        file_path = os.path.abspath(os.path.join(reports_dir, f"{safe_sid}_{filename}"))
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(html)
+
+        return send_file(
+            file_path,
+            mimetype="text/html",
+            as_attachment=True,
+            download_name=filename,
+        )
     except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({"error": _clean_error_message(e)}), 500
+        logger.exception("HTML report generation failed at step '%s': %s", step, e)
+        user_msg = _clean_error_message(e)
+        status_code = 400 if "No dataset loaded" in user_msg else 500
+        return jsonify({"error": user_msg}), status_code
 
 
 @bp.route("/report/pdf", methods=["POST"])
@@ -35,17 +61,33 @@ def pdf_report():
     sid = data.get("session_id")
     mode = data.get("mode", "single")
     report_type = data.get("report_type", "analysis")
-    if not sid: return jsonify({"error": "session_id required."}), 400
+    if not sid:
+        return jsonify({"error": "session_id required."}), 400
 
+    step = "loading dataset"
     try:
+        step = "loading dataset"
         report_data = _build_report_data(sid, mode, report_type)
+        step = "rendering the HTML template"
         html = render_html_report(report_data)
+        step = "converting to PDF"
         pdf_bytes = render_pdf_report(html)
         if not pdf_bytes or not pdf_bytes.startswith(b"%PDF"):
             raise ValueError("Failed to generate a valid PDF byte stream.")
         filename = _report_filename(mode, report_type, "pdf")
+
+        reports_dir = current_app.config.get(
+            "REPORTS_FOLDER",
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "generated_reports"))
+        )
+        os.makedirs(reports_dir, exist_ok=True)
+        safe_sid = re.sub(r"[^a-zA-Z0-9_-]", "_", str(sid))
+        file_path = os.path.abspath(os.path.join(reports_dir, f"{safe_sid}_{filename}"))
+        with open(file_path, "wb") as f:
+            f.write(pdf_bytes)
+
         resp = send_file(
-            io.BytesIO(pdf_bytes),
+            file_path,
             mimetype="application/pdf",
             as_attachment=True,
             download_name=filename,
@@ -55,8 +97,10 @@ def pdf_report():
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         return resp
     except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({"error": _clean_error_message(e)}), 500
+        logger.exception("PDF report generation failed at step '%s': %s", step, e)
+        user_msg = _clean_error_message(e)
+        status_code = 400 if "No dataset loaded" in user_msg else 500
+        return jsonify({"error": user_msg}), status_code
 
 
 @bp.route("/download/dataset", methods=["GET"])
@@ -123,6 +167,12 @@ def _report_filename(mode, report_type, ext):
 
 def _clean_error_message(e: Exception) -> str:
     msg = str(e)
+    # Clear specific error message when no dataset is loaded in session
+    if any(phrase in msg.lower() for phrase in [
+        "no dataset", "not been uploaded", "session not found",
+        "dataset not found", "not uploaded", "no dataset available"
+    ]):
+        return "No dataset loaded. Please upload a dataset again."
     if "truth value of a DataFrame" in msg or "ambiguous" in msg:
         return "Failed to process dataset state. Please ensure the dataset is properly loaded."
     if "traceback" in msg.lower() or "syntaxerror" in msg.lower():
@@ -135,7 +185,7 @@ def _clean_error_message(e: Exception) -> str:
 def _build_report_data(sid, mode, report_type="analysis"):
     sess = sm.get_session(sid)
     if not sess:
-        raise ValueError("Session not found.")
+        raise ValueError("No dataset loaded. Please upload a dataset again.")
 
     # (a) Standalone Reference Dataset Report (same structure as Single Dataset report)
     if report_type in ("reference", "ref"):
@@ -144,7 +194,7 @@ def _build_report_data(sid, mode, report_type="analysis"):
         if ref_final is None:
             ref_final = sm.get_working_df(sid, "ref")
         if ref_orig is None and ref_final is None:
-            raise ValueError("Reference dataset has not been uploaded.")
+            raise ValueError("No dataset loaded. Please upload a dataset again.")
         analysis_before = _get_analysis_before(sid, "ref", ref_orig)
         analysis_after = _get_analysis_after(sid, "ref", ref_final)
         return build_single_report(
@@ -165,7 +215,7 @@ def _build_report_data(sid, mode, report_type="analysis"):
         if cur_final is None:
             cur_final = sm.get_working_df(sid, "cur")
         if cur_orig is None and cur_final is None:
-            raise ValueError("Current dataset has not been uploaded.")
+            raise ValueError("No dataset loaded. Please upload a dataset again.")
         analysis_before = _get_analysis_before(sid, "cur", cur_orig)
         analysis_after = _get_analysis_after(sid, "cur", cur_final)
         return build_single_report(
@@ -193,7 +243,7 @@ def _build_report_data(sid, mode, report_type="analysis"):
             cur_final = sm.get_working_df(sid, "cur")
 
         if ref_final is None or cur_final is None:
-            raise ValueError("Both Reference and Current datasets must be uploaded before generating a comparison report.")
+            raise ValueError("No dataset loaded. Please upload a dataset again.")
 
         ref_analysis_before = _get_analysis_before(sid, "ref", ref_orig)
         ref_analysis_after = _get_analysis_after(sid, "ref", ref_final)
@@ -225,8 +275,12 @@ def _build_report_data(sid, mode, report_type="analysis"):
     final_df = sm.get_finalized_df(sid, "single")
     if final_df is None:
         final_df = sm.get_working_df(sid, "single")
+    if final_df is None and orig_df is None:
+        raise ValueError("No dataset loaded. Please upload a dataset again.")
     if final_df is None:
-        raise ValueError("No dataset available.")
+        final_df = orig_df
+    if final_df is None:
+        raise ValueError("No dataset loaded. Please upload a dataset again.")
 
     analysis_before = _get_analysis_before(sid, "single", orig_df)
     analysis_after = _get_analysis_after(sid, "single", final_df)

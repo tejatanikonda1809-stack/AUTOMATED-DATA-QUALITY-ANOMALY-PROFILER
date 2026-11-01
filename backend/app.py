@@ -13,8 +13,12 @@ def create_app():
     )
     app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB
     app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", os.urandom(24).hex())
-    app.config["UPLOAD_FOLDER"] = os.path.join(os.path.dirname(__file__), "..", "uploads")
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    app.config["UPLOAD_FOLDER"] = os.path.join(project_root, "uploads")
     os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+
+    app.config["REPORTS_FOLDER"] = os.path.join(project_root, "generated_reports")
+    os.makedirs(app.config["REPORTS_FOLDER"], exist_ok=True)
 
     CORS(app)
 

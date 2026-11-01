@@ -5,9 +5,21 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Safely check / wrap WeasyPrint import so missing system libraries (pango, cairo, gobject, etc.)
+# log the specific library and do not prevent module loading or crash HTML reports.
+_WEASYPRINT_AVAILABLE = False
+_WEASYPRINT_ERROR = None
+
+try:
+    from weasyprint import HTML as WeasyHTML  # type: ignore
+    _WEASYPRINT_AVAILABLE = True
+except (ImportError, OSError, Exception) as _err:
+    _WEASYPRINT_ERROR = str(_err)
+    logger.warning("WeasyPrint is not available (missing system library or package: %s). PDF renderer will use fallback.", _err)
+
 
 def render_pdf_report(html_content: str) -> bytes:
-    """Convert HTML report to valid PDF bytes using xhtml2pdf with robust ReportLab fallback."""
+    """Convert HTML report to valid PDF bytes using WeasyPrint (if available), xhtml2pdf, or ReportLab fallback."""
     # 1. Clean HTML for PDF rendering:
     # Completely strip any external @import and @font-face rules that cause network or permission errors
     clean_html = re.sub(r"@import\s+(?:url\([^)]*\)|[^\n;]+)\s*;?", "", html_content, flags=re.IGNORECASE)
@@ -15,7 +27,16 @@ def render_pdf_report(html_content: str) -> bytes:
     clean_html = re.sub(r"<link[^>]+rel=[\"']stylesheet[\"'][^>]*>", "", clean_html, flags=re.IGNORECASE)
     clean_html = re.sub(r"font-family:\s*[^;]+;", "font-family: Helvetica, Arial, sans-serif;", clean_html, flags=re.IGNORECASE)
 
-    # 2. Try xhtml2pdf (pisa)
+    # 2. Try WeasyPrint if available
+    if _WEASYPRINT_AVAILABLE:
+        try:
+            pdf_bytes = WeasyHTML(string=clean_html).write_pdf()
+            if pdf_bytes and pdf_bytes.startswith(b"%PDF") and (b"%%EOF" in pdf_bytes) and len(pdf_bytes) > 500:
+                return pdf_bytes
+        except Exception as e:
+            logger.warning(f"WeasyPrint rendering error: {e}")
+
+    # 3. Try xhtml2pdf (pisa)
     try:
         from xhtml2pdf import pisa
         out = io.BytesIO()
